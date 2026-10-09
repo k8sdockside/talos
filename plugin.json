@@ -1,0 +1,79 @@
+{
+    "$schema": "https://raw.githubusercontent.com/k8sdockside/k8sdockside/main/docs/plugin.schema.json",
+    "id": "talos",
+    "name": "Talos",
+    "version": "0.1.0",
+    "minAppVersion": "0.1.23",
+    "tagline": "the machines under your Kubernetes",
+    "category": "platform",
+    "icon": "server",
+    "logo": "logo.svg",
+    "author": "K8s Dockside",
+    "links": [
+        { "label": "Source", "url": "https://github.com/k8sdockside/talos" },
+        { "label": "Talos docs", "url": "https://www.talos.dev/" }
+    ],
+    "description": "For clusters running Talos Linux 1.12 to 1.15. Every machine on one board: control plane and workers, the Talos version each runs and how far it is from the latest, its stage, its services, its extensions and whether it boots securely. Pick a machine for its hardware, disks, network, services, logs and kernel messages, and etcd on the control plane.\n\nUpgrades, reboots and service restarts are worked out into the exact talosctl command, shown to you, and run in a talosctl console in the dock only if you say yes. The console is there on its own as well, already pointed at the cluster's talosconfig and the machine you picked.\n\nIt runs the talosctl on your machine with the talosconfig you choose for each cluster (~/.talos/config unless you say otherwise). Only the commands listed below can be run; the machine config, which holds secrets, is never read. Without a talosconfig the board still shows what Kubernetes knows about the machines.",
+    "requires": [{ "kind": "nodes", "label": "Nodes" }],
+    "ui": {
+        "tools": [
+            {
+                "id": "talosctl",
+                "label": "talosctl",
+                "command": "talosctl",
+                "version": ["version", "--client", "--short"],
+                "files": [
+                    {
+                        "id": "config",
+                        "label": "talosconfig",
+                        "flag": "--talosconfig",
+                        "env": "TALOSCONFIG",
+                        "default": "~/.talos/config"
+                    }
+                ],
+                "read": [
+                    "config contexts",
+                    "config info **",
+                    "version **",
+                    "get machinestatus **",
+                    "get services **",
+                    "get extensions **",
+                    "get securitystate **",
+                    "get systeminformation **",
+                    "get processors **",
+                    "get memorymodules **",
+                    "get disks **",
+                    "get volumestatus **",
+                    "get mounts **",
+                    "get addresses **",
+                    "get routes **",
+                    "get links **",
+                    "get resolvers **",
+                    "get timestatus **",
+                    "get hostnamestatus **",
+                    "get etcdmembers **",
+                    "get staticpodstatus **",
+                    "logs * **",
+                    "dmesg **",
+                    "etcd members **",
+                    "etcd status **",
+                    "etcd alarm list **",
+                    "health **",
+                    "processes **",
+                    "memory **"
+                ],
+                "run": [
+                    "reboot **",
+                    "shutdown **",
+                    "upgrade **",
+                    "upgrade-k8s **",
+                    "service * restart **",
+                    "etcd defrag **"
+                ],
+                "interactive": ["dashboard **"]
+            }
+        ]
+    },
+    "overview": { "entry": "fleet.html" },
+    "sections": [{ "id": "node", "label": "Talos", "kind": "nodes", "entry": "node.html", "height": 190 }]
+}
