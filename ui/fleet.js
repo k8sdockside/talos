@@ -43,13 +43,77 @@
   }
 
   // src/model/talos.ts
-  var RELEASES = [
-    { minor: "1.12", latest: "v1.12.0", status: "previous" },
-    { minor: "1.13", latest: "v1.13.0", status: "previous" },
-    { minor: "1.14", latest: "v1.14.2", status: "stable" },
-    { minor: "1.15", latest: "v1.15.0-alpha.0", status: "alpha" }
+  var BUILTIN_RELEASES = [
+    { minor: "1.12", latest: "v1.12.12", status: "previous" },
+    { minor: "1.13", latest: "v1.13.12", status: "previous" },
+    { minor: "1.14", latest: "v1.14.5", status: "stable" },
+    { minor: "1.15", latest: "v1.15.0-alpha.1", status: "alpha" }
   ];
-  var LATEST_STABLE = RELEASES.filter((r) => r.status === "stable").at(-1);
+  var BUILTIN_RELEASES_AS_OF = "2026-10-26";
+  var TALOS_REPO = "siderolabs/talos";
+  function knownFrom(list, source) {
+    const stable = list.filter((r) => r.status === "stable").at(-1);
+    return stable ? { releases: [...list], stable, source } : null;
+  }
+  var BUILTIN = knownFrom(BUILTIN_RELEASES, { kind: "builtin", asOf: BUILTIN_RELEASES_AS_OF, stale: false });
+  var known = BUILTIN;
+  function releases() {
+    return known.releases;
+  }
+  function latestStable() {
+    return known.stable;
+  }
+  function releaseSource() {
+    return known.source;
+  }
+  function useReleases(list, source) {
+    const next = knownFrom(list, source);
+    if (!next) return false;
+    known = next;
+    return true;
+  }
+  var TAG = /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+  var PREVIOUS_LINES = 2;
+  function releasesFrom(list, fallback = BUILTIN_RELEASES) {
+    const lines = /* @__PURE__ */ new Map();
+    for (const r of list) {
+      if (!r || r.draft || typeof r.tag !== "string" || !TAG.test(r.tag.trim())) continue;
+      const v = parseVersion(r.tag.trim());
+      if (!v) continue;
+      const key = minorOf(v);
+      const line = lines.get(key) ?? { at: v, final: null, pre: null };
+      if (r.prerelease || v.pre) {
+        if (!line.pre || compareVersions(v, line.pre) > 0) line.pre = v;
+      } else if (!line.final || compareVersions(v, line.final) > 0) {
+        line.final = v;
+      }
+      lines.set(key, line);
+    }
+    const order = [...lines.values()].sort((a, b) => compareVersions(lineStart(a.at), lineStart(b.at)));
+    const finals = order.filter((l) => l.final);
+    const stable = finals.at(-1);
+    if (!stable) return [];
+    const out = [];
+    for (const l of finals.slice(-1 - PREVIOUS_LINES, -1)) {
+      out.push({ minor: minorOf(l.at), latest: l.final.raw, status: "previous" });
+    }
+    const stableV = lineStart(stable.at);
+    const older = fallback.filter((r) => r.status !== "alpha" && compareVersions(lineStart(parseVersion(r.latest)), stableV) < 0).filter((r) => !out.some((o) => o.minor === r.minor)).map((r) => ({ ...r, status: "previous" }));
+    while (out.length < PREVIOUS_LINES && older.length) out.unshift(older.pop());
+    out.sort((a, b) => compareVersions(parseVersion(a.latest), parseVersion(b.latest)));
+    out.push({ minor: minorOf(stable.at), latest: stable.final.raw, status: "stable" });
+    const ahead = order.filter((l) => !l.final && l.pre && compareVersions(lineStart(l.at), stableV) > 0).at(-1);
+    if (ahead) out.push({ minor: minorOf(ahead.at), latest: ahead.pre.raw, status: "alpha" });
+    return out;
+  }
+  function lineStart(v) {
+    return { major: v.major, minor: v.minor, patch: 0, pre: "", raw: `v${v.major}.${v.minor}.0` };
+  }
+  function releasesNote(source, format) {
+    if (source.kind === "builtin") return `built in, as of ${source.asOf}`;
+    const read = `live from GitHub, read ${format(source.asOf)}`;
+    return source.stale ? `${read} (cached, GitHub unreachable)` : read;
+  }
   function parseVersion(text2) {
     const m = /v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(text2 ?? "");
     if (!m) return null;
@@ -69,11 +133,11 @@
     return `${v.major}.${v.minor}`;
   }
   function releaseOf(v) {
-    return RELEASES.find((r) => r.minor === minorOf(v));
+    return releases().find((r) => r.minor === minorOf(v));
   }
   function standing(v) {
     if (!v) return "unknown";
-    const latest = parseVersion(LATEST_STABLE.latest);
+    const latest = parseVersion(latestStable().latest);
     if (v.major === latest.major && v.minor === latest.minor) return compareVersions(v, latest) >= 0 ? "current" : "patch";
     if (compareVersions(v, latest) > 0) return "ahead";
     return releaseOf(v) ? "behind" : "unsupported";
@@ -82,17 +146,151 @@
     if (!v) return null;
     const current = releaseOf(v);
     if (current && compareVersions(v, parseVersion(current.latest)) < 0) return current;
-    const latest = parseVersion(LATEST_STABLE.latest);
+    const stable = latestStable();
+    const latest = parseVersion(stable.latest);
     if (compareVersions(v, latest) >= 0) return null;
-    const next = RELEASES.find((r) => {
+    const next = releases().find((r) => {
       const rv = parseVersion(r.latest);
       return r.status !== "alpha" && (rv.major > v.major || rv.major === v.major && rv.minor === v.minor + 1);
     });
-    return next ?? LATEST_STABLE;
+    return next ?? stable;
   }
-  function installerImage(version, schematic) {
+  function parseImageRef(image) {
+    let rest = image.trim();
+    if (!rest || /\s/.test(rest)) return null;
+    let digest = "";
+    const at = rest.indexOf("@");
+    if (at >= 0) {
+      digest = rest.slice(at + 1);
+      rest = rest.slice(0, at);
+    }
+    let tag = "";
+    const colon = rest.lastIndexOf(":");
+    if (colon > rest.lastIndexOf("/")) {
+      tag = rest.slice(colon + 1);
+      rest = rest.slice(0, colon);
+    }
+    const parts = rest.split("/");
+    let registry = "";
+    if (parts.length > 1 && (parts[0].includes(".") || parts[0].includes(":") || parts[0] === "localhost")) registry = parts.shift();
+    if (!parts.length || parts.some((p) => !p)) return null;
+    return { registry, path: parts.join("/"), tag, digest };
+  }
+  function parseInstallerImage(image) {
+    const ref = parseImageRef(image);
+    if (!ref) return null;
+    const segs = ref.path.split("/");
+    const n = segs.length;
+    const factory = !!ref.registry && n >= 2 && /(^|-)installer(-secureboot)?$/.test(segs[n - 2]) && /^[0-9a-f]+$/.test(segs[n - 1]);
+    if (!factory) return { ...ref, factory, host: ref.registry, variant: ref.path, schematic: "" };
+    return { ...ref, factory, host: [ref.registry, ...segs.slice(0, n - 2)].join("/"), variant: segs[n - 2], schematic: segs[n - 1] };
+  }
+  function registryHost(url) {
+    if (!url) return "";
+    try {
+      return new URL(url).host;
+    } catch {
+      return "";
+    }
+  }
+  function installSource(factory, platform, secureBoot, schematicFromExtensions, configImage) {
+    const running = factory?.schematicId || schematicFromExtensions;
+    const host = registryHost(factory?.apiUrl);
+    const base = {
+      platform: platform?.platform || "metal",
+      secureBoot: !!secureBoot,
+      configImage: configImage?.trim() ?? "",
+      note: "",
+      repository: ""
+    };
+    const ref = configImage ? parseInstallerImage(configImage) : null;
+    if (ref?.factory) {
+      return {
+        ...base,
+        from: "config",
+        factory: ref.host,
+        variant: ref.variant,
+        schematic: running || ref.schematic,
+        schematicFrom: running ? "machine" : "config",
+        secureBoot: ref.variant.endsWith("-secureboot"),
+        known: !!running,
+        note: running ? "" : "The schematic is the one the machine was first installed with -- the machine did not say which it runs now. Check the image."
+      };
+    }
+    if (ref) {
+      const repository = ref.registry ? `${ref.registry}/${ref.path}` : ref.path;
+      return {
+        ...base,
+        from: "config",
+        factory: ref.registry,
+        variant: ref.variant,
+        schematic: "",
+        schematicFrom: "",
+        repository,
+        known: true,
+        note: running ? `The machine runs Image Factory schematic ${running.slice(0, 12)}…, but its machine config installs from ${repository}, which is not a factory image and may not have that schematic's extensions. Check the image.` : ""
+      };
+    }
+    return {
+      ...base,
+      from: "machine",
+      factory: running ? host || "factory.talos.dev" : "",
+      variant: running ? `${base.platform}-installer${base.secureBoot ? "-secureboot" : ""}` : "siderolabs/installer",
+      schematic: running,
+      schematicFrom: running ? "machine" : "",
+      known: !!(platform?.platform && (!running || host))
+    };
+  }
+  function installerImage(version, src) {
     const tag = version.startsWith("v") ? version : `v${version}`;
-    return schematic ? `factory.talos.dev/metal-installer/${schematic}:${tag}` : `ghcr.io/siderolabs/installer:${tag}`;
+    if (src.repository) return `${src.repository}:${tag}`;
+    if (!src.schematic) return `ghcr.io/siderolabs/installer:${tag}`;
+    return `${src.factory}/${src.variant}/${src.schematic}:${tag}`;
+  }
+  function imageVersion(image) {
+    const at = image.lastIndexOf(":");
+    if (at < 0 || image.slice(at).includes("/")) return null;
+    return parseVersion(image.slice(at + 1));
+  }
+  function upgradeOptions(v, withPrereleases2) {
+    if (!v) return [];
+    const out = [];
+    const kindOf = (to, sameLine) => to.pre ? "prerelease" : sameLine ? "patch" : "minor";
+    let onNewestPatch = true;
+    for (const r of releases()) {
+      const to = parseVersion(r.latest);
+      if (!to || compareVersions(to, v) <= 0) continue;
+      const sameLine = to.major === v.major && to.minor === v.minor;
+      const nextLine = to.major === v.major && to.minor === v.minor + 1;
+      if (!sameLine && !nextLine) continue;
+      if (to.pre && !withPrereleases2) continue;
+      if (sameLine && !to.pre) onNewestPatch = false;
+      out.push({ version: r.latest, kind: kindOf(to, sameLine), next: false });
+    }
+    const allowed = onNewestPatch ? out : out.filter((o) => o.kind !== "minor" && !(o.kind === "prerelease" && !sameMinor(o.version, v)));
+    const first = allowed.find((o) => o.kind !== "prerelease") ?? allowed[0];
+    if (first) first.next = true;
+    return allowed;
+  }
+  function heldBackPrereleases(v) {
+    if (!v) return [];
+    const offered = new Set(upgradeOptions(v, true).map((o) => o.version));
+    const newestPatch = releases().find((r) => r.minor === `${v.major}.${v.minor}`)?.latest;
+    const out = [];
+    for (const r of releases()) {
+      const to = parseVersion(r.latest);
+      if (!to?.pre || compareVersions(to, v) <= 0 || offered.has(r.latest)) continue;
+      const nextLine = to.major === v.major && to.minor === v.minor + 1;
+      out.push({
+        version: r.latest,
+        reason: nextLine && newestPatch ? `upgrade to ${newestPatch} first -- the next minor is taken from the newest patch of this one` : `one minor at a time -- ${v.major}.${v.minor + 1} first`
+      });
+    }
+    return out;
+  }
+  function sameMinor(version, v) {
+    const to = parseVersion(version);
+    return !!to && to.major === v.major && to.minor === v.minor;
   }
   function parseResources(stdout) {
     const out = [];
@@ -137,19 +335,78 @@
       nodes: list(cut(line, 3))
     })).filter((c) => c.name !== "");
   }
+  function hostOf(endpoint) {
+    return endpoint.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/^\[([^\]]+)\](:\d+)?$/, "$1").replace(/^([^:]+):\d+$/, "$1");
+  }
   function matchContext(contexts, addresses) {
-    const host = (e) => e.replace(/^https?:\/\//, "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
-    const known = new Set(addresses);
-    return contexts.find((c) => [...c.endpoints, ...c.nodes].some((e) => known.has(host(e)))) ?? contexts.find((c) => c.current) ?? contexts[0] ?? null;
+    const known2 = new Set(addresses);
+    return contexts.find((c) => [...c.endpoints, ...c.nodes].some((e) => known2.has(hostOf(e)))) ?? contexts.find((c) => c.current) ?? contexts[0] ?? null;
+  }
+  var DEFAULT_SETTINGS = { prefer: "auto", nodes: {}, endpoints: { use: "config", custom: [] } };
+  function normaliseSettings(raw) {
+    const r = raw && typeof raw === "object" ? raw : {};
+    const prefer = r.prefer === "external" || r.prefer === "internal" ? r.prefer : "auto";
+    const nodes = {};
+    if (r.nodes && typeof r.nodes === "object") {
+      for (const [name, v] of Object.entries(r.nodes)) {
+        const n = v && typeof v === "object" ? v : {};
+        const use2 = ["external", "internal", "custom"].find((u) => u === n.use);
+        if (!use2) continue;
+        const custom2 = typeof n.custom === "string" ? n.custom.trim() : "";
+        if (use2 === "custom" && !custom2) continue;
+        nodes[name] = use2 === "custom" ? { use: use2, custom: custom2 } : { use: use2 };
+      }
+    }
+    const e = r.endpoints && typeof r.endpoints === "object" ? r.endpoints : {};
+    const custom = Array.isArray(e.custom) ? e.custom.filter((x) => typeof x === "string").map((x) => x.trim()).filter(Boolean) : [];
+    const use = e.use === "node" ? "node" : e.use === "custom" && custom.length ? "custom" : "config";
+    return { prefer, nodes, endpoints: { use, custom } };
+  }
+  function pickAddress(m, settings, context) {
+    const own = settings.nodes[m.name];
+    if (own?.use === "custom" && own.custom) return { address: own.custom, source: "custom" };
+    const ext = m.external[0];
+    const int = m.internal[0];
+    const first = (order) => {
+      for (const kind of order) {
+        const a = kind === "external" ? ext : int;
+        if (a) return { address: a, source: kind };
+      }
+      return { address: "", source: "none" };
+    };
+    if (own?.use === "external") return first(["external", "internal"]);
+    if (own?.use === "internal") return first(["internal", "external"]);
+    if (settings.prefer === "internal") return first(["internal", "external"]);
+    if (settings.prefer === "external") return first(["external", "internal"]);
+    if (context) {
+      const named = new Set([...context.nodes, ...context.endpoints].map(hostOf));
+      const hit = [...m.external, ...m.internal].find((a) => named.has(a));
+      if (hit) return { address: hit, source: "talosconfig" };
+    }
+    return first(["external", "internal"]);
+  }
+  function endpointsFor(settings, nodes) {
+    if (settings.endpoints.use === "custom") return settings.endpoints.custom;
+    if (settings.endpoints.use === "node") return nodes;
+    return [];
   }
   function machineOf(node) {
     const labels = node.metadata.labels ?? {};
     const addresses = node.status?.addresses ?? [];
     const info = node.status?.nodeInfo ?? {};
     const os = info.osImage ?? "";
+    const of = (type) => addresses.filter((a) => a.type === type && a.address).map((a) => a.address);
+    const internal = of("InternalIP");
+    const listedExternal = of("ExternalIP");
+    const external = listedExternal.length ? listedExternal : internal.filter(isPublicIP);
+    const picked = pickAddress({ name: node.metadata.name, internal, external }, DEFAULT_SETTINGS, null);
     return {
       name: node.metadata.name,
-      address: addresses.find((a) => a.type === "InternalIP")?.address ?? addresses.find((a) => a.type === "ExternalIP")?.address ?? "",
+      address: picked.address,
+      addressFrom: picked.source,
+      internal,
+      external,
+      externalFrom: listedExternal.length ? "kubernetes" : external.length ? "internalip" : "",
       controlPlane: "node-role.kubernetes.io/control-plane" in labels || "node-role.kubernetes.io/master" in labels,
       talos: /talos/i.test(os) ? parseVersion(os) : null,
       kubelet: info.kubeletVersion ?? "",
@@ -160,6 +417,44 @@
       cpu: node.status?.capacity?.cpu ?? "",
       memory: memoryText(node.status?.capacity?.memory ?? "")
     };
+  }
+  function withAddresses(machines, settings, context) {
+    return machines.map((m) => {
+      const picked = pickAddress(m, settings, context);
+      return { ...m, address: picked.address, addressFrom: picked.source };
+    });
+  }
+  function isPublicIP(address) {
+    const ip = address.split("/")[0].trim();
+    const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+    if (v4) {
+      const [a, b] = [Number(v4[1]), Number(v4[2])];
+      if ([a, b, Number(v4[3]), Number(v4[4])].some((n) => n > 255)) return false;
+      if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+      if (a === 100 && b >= 64 && b <= 127) return false;
+      if (a === 169 && b === 254) return false;
+      if (a === 172 && b >= 16 && b <= 31) return false;
+      if (a === 192 && b === 168) return false;
+      return true;
+    }
+    if (!ip.includes(":")) return false;
+    const head = parseInt(ip.split(":")[0] || "0", 16);
+    if (!(head >= 8192 && head <= 16383)) return false;
+    return !/^2001:0?db8:/i.test(ip);
+  }
+  function publicAddresses(cidrs) {
+    const ips = [...new Set(cidrs.map((c) => c.split("/")[0].trim()).filter(isPublicIP))];
+    return [...ips.filter((ip) => !ip.includes(":")), ...ips.filter((ip) => ip.includes(":"))];
+  }
+  function withTalosAddresses(machines, learned) {
+    return machines.map((m) => {
+      const extra = learned[m.name] ?? [];
+      if (m.externalFrom === "kubernetes" || !extra.length) return m;
+      return { ...m, external: [.../* @__PURE__ */ new Set([...extra, ...m.external])], externalFrom: "talos" };
+    });
+  }
+  function allAddresses(machines) {
+    return [...new Set(machines.flatMap((m) => [...m.external, ...m.internal]))];
   }
   function memoryText(quantity) {
     const m = /^(\d+)(Ki|Mi|Gi)?$/.exec(quantity);
@@ -179,9 +474,13 @@
     return extensions.filter((e) => !["schematic", "modules.dep"].includes(e.spec.metadata?.name ?? ""));
   }
   function serviceHealth(s) {
-    if (s.unknown) return "unknown";
     if (!s.running) return "stopped";
-    return s.healthy ? "healthy" : "running";
+    if (s.unknown) return "running";
+    return s.healthy ? "healthy" : "unhealthy";
+  }
+  function serviceOk(s) {
+    const h = serviceHealth(s);
+    return h === "healthy" || h === "running";
   }
   function stageTone(stage) {
     switch (stage) {
@@ -210,16 +509,65 @@
   // src/ui/logo.ts
   var TALOS_LOGO = '<svg aria-label="Talos by Sidero Labs" role="img" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 3517 1000"><defs><linearGradient id="talos-grad" x1="522.13" y1="-10627.03" x2="522.13" y2="-11761.55" gradientTransform="translate(0 -10761.5486) scale(1 -1)" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#e8312c"/><stop offset=".51" stop-color="#e2335a"/><stop offset="1" stop-color="#f77216"/></linearGradient><linearGradient id="talos-grad-2" x1="891.83" y1="-10896.34" x2="891.83" y2="-11550.85" xlink:href="#talos-grad"/><linearGradient id="talos-grad-3" x1="727.26" y1="-10690.22" x2="727.26" y2="-11713.86" xlink:href="#talos-grad"/><linearGradient id="talos-grad-4" x1="316.96" y1="-10690.36" x2="316.96" y2="-11713.46" xlink:href="#talos-grad"/><linearGradient id="talos-grad-5" x1="152.69" y1="-10896.3" x2="152.69" y2="-11550.81" xlink:href="#talos-grad"/></defs><path fill="url(#talos-grad)" d="M522.13,0c-11.48,0-23.43.48-37.59,1.56-4.5.35-8.01,4.11-8.01,8.62v979.65c0,4.55,3.51,8.31,8.01,8.62,14.25,1.08,26.2,1.56,37.67,1.56s23.34-.48,37.5-1.56c4.5-.35,8.01-4.11,8.01-8.62V10.18c0-4.55-3.51-8.31-8.01-8.62-14.16-1.04-26.03-1.56-37.41-1.56h-.17Z"/><path fill="url(#talos-grad-2)" d="M961.37,212.4c-2.25,0-4.46.87-6.06,2.47-4.24,4.16-8.49,8.4-12.77,12.69-111.98,112.71-166.72,201.96-167.37,272.84-.65,70.58,54.39,160.78,168.28,275.79,3.29,3.34,6.54,6.58,9.83,9.79l.82.82c1.65,1.6,3.81,2.51,6.11,2.51h.78c2.55-.22,4.85-1.56,6.32-3.68,14.94-21.43,28.19-43.91,39.36-66.81,1.6-3.29.95-7.23-1.6-9.87-89.77-91.63-139-165.37-138.61-207.67.39-43.39,49.97-117.35,139.57-208.24,2.55-2.6,3.2-6.54,1.64-9.83-11.04-22.86-24.21-45.42-39.1-67.03-1.47-2.12-3.77-3.46-6.32-3.68h-.82l-.04-.09Z"/><path fill="url(#talos-grad-3)" d="M755.77,50.04c-1,0-1.99.17-2.95.52-2.21.78-3.98,2.47-4.98,4.59-74.22,165.11-122.2,340-122.2,445.66,0,110.85,45.99,286.05,117.18,446.39.95,2.12,2.73,3.81,4.89,4.59.95.35,1.99.52,2.99.52,1.26,0,2.55-.3,3.72-.82,23.12-11.04,45.68-24.03,66.99-38.62,3.42-2.34,4.72-6.8,3.03-10.61-65.39-149.52-107.61-307.14-107.61-401.49s43.69-248.64,111.29-400.45c1.69-3.81.43-8.27-2.95-10.61-21-14.64-43.09-27.71-65.65-38.75-1.21-.61-2.51-.87-3.81-.87l.04-.04Z"/><path fill="url(#talos-grad-4)" d="M288.5,50.12c-1.3,0-2.6.3-3.81.91-22.56,11.09-44.65,24.16-65.65,38.8-3.42,2.38-4.63,6.84-2.95,10.61,67.55,151.81,111.2,308.96,111.2,400.36s-42.22,251.88-107.57,401.4c-1.65,3.81-.39,8.27,3.03,10.61,21.13,14.46,43.39,27.32,66.08,38.23,1.17.56,2.47.87,3.77.87,1,0,2.04-.17,2.99-.52,2.21-.82,3.98-2.47,4.94-4.63,71.71-161.9,118.05-336.93,118.05-445.92s-47.94-280.51-122.16-445.57c-.95-2.12-2.77-3.81-4.98-4.59-.95-.35-1.95-.52-2.95-.52v-.04Z"/><path fill="url(#talos-grad-5)" d="M82.29,212.44c-2.55.26-4.85,1.6-6.32,3.68-14.94,21.61-28.1,44.17-39.1,67.03-1.6,3.29-.95,7.23,1.65,9.83,89.59,90.89,139.18,164.85,139.57,208.24.56,61.18-106.01,174.29-138.7,207.5-2.55,2.6-3.2,6.58-1.6,9.87,11.17,22.95,24.42,45.47,39.45,66.99,1.47,2.08,3.77,3.42,6.32,3.68h.78c2.25,0,4.46-.91,6.11-2.51l.56-.56c3.33-3.33,6.71-6.67,10.09-10.04,113.89-115.01,168.93-205.21,168.28-275.79-.65-70.88-55.43-160.13-167.37-272.84-4.24-4.29-8.53-8.49-12.77-12.69-1.65-1.6-3.81-2.47-6.06-2.47h-.82l-.04.09Z"/><g><path fill="currentColor" d="M1572.73,353.63h-138.88v364.48h-89.28v-364.48h-138.88v-83.52h367.04v83.52Z"/><path fill="currentColor" d="M2039.62,718.11h-95.36l-39.04-104.32h-191.04l-39.04,104.32h-93.12l174.4-448h108.8l174.4,448ZM1744.9,531.55h129.6l-64.64-173.12-64.96,173.12Z"/><path fill="currentColor" d="M2455.29,718.11h-326.08v-448h89.28v364.48h236.8v83.52Z"/><path fill="currentColor" d="M2744.25,261.79c34.56,0,66.24,5.81,95.04,17.44,28.8,11.63,53.6,27.79,74.4,48.48,20.8,20.7,37.01,45.23,48.64,73.6,11.62,28.38,17.44,59.31,17.44,92.8s-5.82,64.43-17.44,92.8c-11.63,28.38-27.84,52.91-48.64,73.6-20.8,20.69-45.6,36.85-74.4,48.48-28.8,11.62-60.48,17.44-95.04,17.44s-66.24-5.82-95.04-17.44c-28.8-11.62-53.6-27.79-74.4-48.48-20.8-20.69-36.96-45.23-48.48-73.6-11.52-28.37-17.28-59.3-17.28-92.8s5.76-64.43,17.28-92.8c11.52-28.37,27.68-52.9,48.48-73.6,20.8-20.69,45.6-36.85,74.4-48.48,28.8-11.62,60.48-17.44,95.04-17.44ZM2744.25,347.55c-20.48,0-39.42,3.57-56.8,10.72-17.39,7.15-32.43,17.12-45.12,29.92-12.69,12.8-22.56,28.21-29.6,46.24-7.04,18.03-10.56,37.92-10.56,59.68s3.52,41.65,10.56,59.68c7.04,18.03,16.91,33.44,29.6,46.24,12.69,12.8,27.73,22.78,45.12,29.92,17.38,7.15,36.32,10.72,56.8,10.72s39.73-3.57,57.12-10.72c17.38-7.14,32.37-17.12,44.96-29.92,12.58-12.8,22.4-28.21,29.44-46.24,7.04-18.03,10.56-37.92,10.56-59.68s-3.52-41.65-10.56-59.68c-7.04-18.03-16.86-33.44-29.44-46.24-12.59-12.8-27.58-22.77-44.96-29.92-17.39-7.15-36.43-10.72-57.12-10.72Z"/><path fill="currentColor" d="M3392.9,383.07c-17.71-10.88-37.17-19.95-58.4-27.2-21.23-7.25-44.11-10.88-68.64-10.88-12.59,0-24.11,1.23-34.56,3.68-10.46,2.46-19.47,5.98-27.04,10.56-7.58,4.59-13.5,10.19-17.76,16.8-4.27,6.62-6.4,14.19-6.4,22.72s2.29,15.26,6.88,20.8c4.58,5.55,10.99,10.24,19.2,14.08,8.21,3.84,17.97,7.1,29.28,9.76,11.3,2.67,23.68,5.07,37.12,7.2l25.28,4.16c20.05,3.2,38.77,7.9,56.16,14.08,17.38,6.19,32.48,14.29,45.28,24.32,12.8,10.03,22.88,22.19,30.24,36.48,7.36,14.29,11.04,31.15,11.04,50.56,0,24.75-5.01,46.24-15.04,64.48-10.03,18.24-23.52,33.39-40.48,45.44-16.96,12.05-36.48,21.07-58.56,27.04-22.08,5.97-45.18,8.96-69.28,8.96-17.07,0-34.24-1.23-51.52-3.68-17.28-2.46-34.08-6.13-50.4-11.04-16.32-4.9-31.9-11.04-46.72-18.4-14.83-7.36-28.21-15.84-40.16-25.44l46.4-72c8.11,6.4,17.38,12.54,27.84,18.4,10.45,5.87,21.81,11.04,34.08,15.52,12.27,4.48,25.17,8,38.72,10.56,13.54,2.56,27.57,3.84,42.08,3.84,12.37,0,23.95-1.17,34.72-3.52,10.77-2.35,20.1-5.87,28-10.56,7.89-4.69,14.08-10.35,18.56-16.96,4.48-6.61,6.72-14.29,6.72-23.04,0-7.68-2.03-14.29-6.08-19.84-4.06-5.54-10.08-10.29-18.08-14.24-8-3.95-17.92-7.36-29.76-10.24-11.84-2.88-25.55-5.6-41.12-8.16l-28.48-4.48c-19.84-3.2-38.08-7.84-54.72-13.92-16.64-6.08-31.04-14.24-43.2-24.48-12.16-10.24-21.66-22.72-28.48-37.44-6.83-14.72-10.24-32.21-10.24-52.48,0-23.25,4.85-43.79,14.56-61.6,9.71-17.81,22.72-32.64,39.04-44.48s35.25-20.8,56.8-26.88c21.54-6.08,44.27-9.12,68.16-9.12,15.57,0,30.67.91,45.28,2.72,14.61,1.82,28.85,4.64,42.72,8.48,13.87,3.84,27.68,8.8,41.44,14.88,13.76,6.08,27.68,13.28,41.76,21.6l-42.24,72.96Z"/></g><g><path fill="currentColor" d="M2610.16,867.02c6.67,0,12.88,1.23,18.65,3.7,5.77,2.47,10.78,5.9,15.05,10.3,4.27,4.4,7.63,9.62,10.1,15.65,2.47,6.04,3.7,12.65,3.7,19.85s-1.23,13.82-3.7,19.85c-2.47,6.03-5.83,11.25-10.1,15.65-4.27,4.4-9.28,7.83-15.05,10.3-5.77,2.47-11.98,3.7-18.65,3.7-7.53,0-14.07-1.33-19.6-4-5.53-2.67-10.17-6.23-13.9-10.7v12.7h-16.3v-144h16.3v61.7c3.73-4.47,8.37-8.03,13.9-10.7,5.53-2.67,12.07-4,19.6-4ZM2608.26,882.42c-4.8,0-9.2.87-13.2,2.6-4,1.73-7.43,4.13-10.3,7.2-2.87,3.07-5.1,6.67-6.7,10.8-1.6,4.13-2.4,8.63-2.4,13.5s.8,9.38,2.4,13.55c1.6,4.17,3.83,7.79,6.7,10.85,2.87,3.07,6.3,5.47,10.3,7.2,4,1.73,8.4,2.6,13.2,2.6s9.4-.9,13.4-2.7,7.43-4.25,10.3-7.35c2.87-3.1,5.07-6.71,6.6-10.85,1.53-4.13,2.3-8.57,2.3-13.3s-.78-9.17-2.35-13.3c-1.57-4.13-3.78-7.75-6.65-10.85-2.87-3.1-6.3-5.53-10.3-7.3-4-1.77-8.43-2.65-13.3-2.65Z"/><path fill="currentColor" d="M2693.05,1004.52h-18.1l35.1-60.8-43.3-74.7h18.3l34.2,58.4,32.5-58.4h18l-76.7,135.5Z"/><path fill="currentColor" d="M2931.55,859.32c-5.53-3.4-11.62-6.23-18.25-8.5-6.63-2.27-13.78-3.4-21.45-3.4-3.93,0-7.53.38-10.8,1.15-3.27.77-6.08,1.87-8.45,3.3-2.37,1.43-4.22,3.18-5.55,5.25-1.33,2.07-2,4.43-2,7.1s.72,4.77,2.15,6.5c1.43,1.73,3.43,3.2,6,4.4,2.57,1.2,5.62,2.22,9.15,3.05,3.53.83,7.4,1.58,11.6,2.25l7.9,1.3c6.27,1,12.12,2.47,17.55,4.4,5.43,1.93,10.15,4.47,14.15,7.6,4,3.13,7.15,6.93,9.45,11.4,2.3,4.47,3.45,9.73,3.45,15.8,0,7.73-1.57,14.45-4.7,20.15-3.13,5.7-7.35,10.43-12.65,14.2-5.3,3.77-11.4,6.58-18.3,8.45s-14.12,2.8-21.65,2.8c-5.33,0-10.7-.38-16.1-1.15-5.4-.77-10.65-1.92-15.75-3.45-5.1-1.53-9.97-3.45-14.6-5.75-4.63-2.3-8.82-4.95-12.55-7.95l14.5-22.5c2.53,2,5.43,3.92,8.7,5.75,3.27,1.83,6.82,3.45,10.65,4.85,3.83,1.4,7.87,2.5,12.1,3.3,4.23.8,8.62,1.2,13.15,1.2,3.87,0,7.48-.37,10.85-1.1,3.37-.73,6.28-1.83,8.75-3.3,2.47-1.46,4.4-3.23,5.8-5.3s2.1-4.47,2.1-7.2c0-2.4-.63-4.46-1.9-6.2-1.27-1.73-3.15-3.22-5.65-4.45-2.5-1.23-5.6-2.3-9.3-3.2s-7.98-1.75-12.85-2.55l-8.9-1.4c-6.2-1-11.9-2.45-17.1-4.35-5.2-1.9-9.7-4.45-13.5-7.65-3.8-3.2-6.77-7.1-8.9-11.7-2.13-4.6-3.2-10.06-3.2-16.4,0-7.27,1.52-13.68,4.55-19.25,3.03-5.57,7.1-10.2,12.2-13.9,5.1-3.7,11.02-6.5,17.75-8.4,6.73-1.9,13.83-2.85,21.3-2.85,4.87,0,9.58.28,14.15.85,4.57.57,9.02,1.45,13.35,2.65,4.33,1.2,8.65,2.75,12.95,4.65,4.3,1.9,8.65,4.15,13.05,6.75l-13.2,22.8Z"/><path fill="currentColor" d="M2982.55,818.62c2.33,0,4.52.43,6.55,1.3,2.03.87,3.8,2.05,5.3,3.55s2.68,3.28,3.55,5.35c.87,2.07,1.3,4.27,1.3,6.6s-.43,4.52-1.3,6.55c-.87,2.03-2.05,3.8-3.55,5.3s-3.27,2.67-5.3,3.5c-2.03.83-4.22,1.25-6.55,1.25s-4.52-.42-6.55-1.25c-2.03-.83-3.8-2-5.3-3.5s-2.67-3.27-3.5-5.3c-.83-2.03-1.25-4.22-1.25-6.55s.42-4.53,1.25-6.6c.83-2.07,2-3.85,3.5-5.35s3.27-2.68,5.3-3.55c2.03-.87,4.22-1.3,6.55-1.3ZM2995.75,964.02h-26.1v-96.9h26.1v96.9Z"/><path fill="currentColor" d="M3064.05,864.52c6.53,0,12.12,1.17,16.75,3.5,4.63,2.33,8.55,5.4,11.75,9.2v-57.2h26v144h-25.5v-10.7c-3.2,3.93-7.17,7.12-11.9,9.55-4.73,2.43-10.43,3.65-17.1,3.65s-12.87-1.3-18.6-3.9c-5.73-2.6-10.7-6.17-14.9-10.7-4.2-4.53-7.48-9.92-9.85-16.15-2.37-6.23-3.55-12.98-3.55-20.25s1.18-14.02,3.55-20.25c2.37-6.23,5.65-11.62,9.85-16.15,4.2-4.53,9.17-8.1,14.9-10.7,5.73-2.6,11.93-3.9,18.6-3.9ZM3068.85,888.82c-3.8,0-7.25.7-10.35,2.1-3.1,1.4-5.73,3.3-7.9,5.7-2.17,2.4-3.83,5.23-5,8.5-1.17,3.27-1.75,6.73-1.75,10.4s.58,7.22,1.75,10.45c1.17,3.23,2.83,6.05,5,8.45,2.17,2.4,4.8,4.3,7.9,5.7,3.1,1.4,6.55,2.1,10.35,2.1s7.13-.67,10.2-2c3.07-1.33,5.7-3.2,7.9-5.6,2.2-2.4,3.9-5.23,5.1-8.5,1.2-3.27,1.8-6.8,1.8-10.6s-.6-7.33-1.8-10.6c-1.2-3.27-2.9-6.1-5.1-8.5-2.2-2.4-4.83-4.27-7.9-5.6-3.07-1.33-6.47-2-10.2-2Z"/><path fill="currentColor" d="M3188.95,864.52c7,0,13.38,1.23,19.15,3.7,5.77,2.47,10.72,5.93,14.85,10.4,4.13,4.47,7.35,9.83,9.65,16.1,2.3,6.27,3.45,13.17,3.45,20.7,0,1.54-.05,3.1-.15,4.7-.1,1.6-.22,2.97-.35,4.1h-68.7c.67,3.53,1.77,6.55,3.3,9.05,1.53,2.5,3.38,4.58,5.55,6.25,2.17,1.67,4.62,2.88,7.35,3.65,2.73.77,5.63,1.15,8.7,1.15,4.2,0,8.45-.8,12.75-2.4,4.3-1.6,8.22-3.9,11.75-6.9l15.3,16.8c-5.53,5.07-11.75,8.79-18.65,11.15s-14.45,3.55-22.65,3.55c-7.4,0-14.18-1.22-20.35-3.65-6.17-2.43-11.47-5.87-15.9-10.3-4.43-4.43-7.88-9.77-10.35-16-2.47-6.23-3.7-13.15-3.7-20.75s1.2-14.55,3.6-20.85c2.4-6.3,5.75-11.7,10.05-16.2,4.3-4.5,9.45-8,15.45-10.5s12.63-3.75,19.9-3.75ZM3188.75,887.02c-6.2,0-11.1,1.72-14.7,5.15-3.6,3.44-5.97,8.19-7.1,14.25h42.9c-1.2-6.27-3.6-11.06-7.2-14.4-3.6-3.33-8.23-5-13.9-5Z"/><path fill="currentColor" d="M3309.95,864.52c2.8,0,5.32.18,7.55.55,2.23.37,4.25.88,6.05,1.55l-3.9,25.9c-2.13-.93-4.63-1.68-7.5-2.25-2.87-.57-5.63-.85-8.3-.85-3,0-5.75.47-8.25,1.4-2.5.93-4.65,2.3-6.45,4.1-1.8,1.8-3.2,4.07-4.2,6.8-1,2.73-1.5,5.9-1.5,9.5v52.8h-26.1v-96.9h25.3v10.6c3.07-4.6,6.88-7.95,11.45-10.05,4.57-2.1,9.85-3.15,15.85-3.15Z"/><path fill="currentColor" d="M3384.35,864.52c7.53,0,14.52,1.28,20.95,3.85,6.43,2.57,11.98,6.13,16.65,10.7,4.67,4.57,8.32,9.97,10.95,16.2,2.63,6.23,3.95,12.98,3.95,20.25s-1.32,14.1-3.95,20.3c-2.63,6.2-6.28,11.58-10.95,16.15-4.67,4.57-10.22,8.13-16.65,10.7-6.43,2.57-13.42,3.85-20.95,3.85s-14.5-1.28-20.9-3.85c-6.4-2.56-11.92-6.13-16.55-10.7-4.63-4.57-8.27-9.95-10.9-16.15-2.63-6.2-3.95-12.96-3.95-20.3s1.32-14.02,3.95-20.25c2.63-6.23,6.27-11.63,10.9-16.2,4.63-4.57,10.15-8.13,16.55-10.7s13.37-3.85,20.9-3.85ZM3384.35,888.82c-3.67,0-7.07.65-10.2,1.95-3.13,1.3-5.85,3.13-8.15,5.5-2.3,2.37-4.1,5.18-5.4,8.45-1.3,3.27-1.95,6.87-1.95,10.8s.65,7.53,1.95,10.8c1.3,3.27,3.1,6.08,5.4,8.45,2.3,2.37,5.02,4.2,8.15,5.5,3.13,1.3,6.53,1.95,10.2,1.95s7.08-.65,10.25-1.95c3.17-1.3,5.9-3.13,8.2-5.5,2.3-2.37,4.1-5.18,5.4-8.45,1.3-3.27,1.95-6.87,1.95-10.8s-.65-7.53-1.95-10.8c-1.3-3.27-3.1-6.08-5.4-8.45-2.3-2.37-5.03-4.2-8.2-5.5-3.17-1.3-6.58-1.95-10.25-1.95Z"/></g></svg>';
 
+  // src/ui/releases.ts
+  var loading = null;
+  function loadReleases() {
+    loading ??= (async () => {
+      const ask = k8sdockside.releases;
+      if (typeof ask !== "function") return false;
+      try {
+        const list = await ask.call(k8sdockside, TALOS_REPO);
+        const lines = releasesFrom(list);
+        return useReleases(lines, { kind: "live", asOf: list.fetchedAt || (/* @__PURE__ */ new Date()).toISOString(), stale: !!list.stale });
+      } catch {
+        return false;
+      }
+    })();
+    return loading;
+  }
+  function releasesText() {
+    return releasesNote(releaseSource(), (iso) => {
+      const at = new Date(iso);
+      if (Number.isNaN(at.getTime())) return iso;
+      return k8sdockside.format?.dateTime(at) ?? at.toLocaleString();
+    });
+  }
+  function releasesTitle() {
+    const s = releaseSource();
+    if (s.kind === "builtin") {
+      return "The release table this plugin ships with. With K8s Dockside 0.1.33 or newer and Settings → Notifications → Release lists for plugins on, the app reads the latest from GitHub instead.";
+    }
+    return s.stale ? "GitHub could not be asked just now (unreachable or rate-limited), so this is the list the app read last." : "Read from github.com/siderolabs/talos/releases by the app; it asks again after six hours.";
+  }
+
   // src/ui/talos.ts
   var TOOL = "talosctl";
   var CONTEXT_KEY = "talosContext";
+  var SETTINGS_KEY = "talosSettings";
+  var LEARNED_KEY = "talosAddresses";
   function tools() {
     const t = k8sdockside.tools;
     if (!t) throw new Error("talosctl needs K8s Dockside 0.1.23 or newer");
     return t;
   }
+  async function loadSettings() {
+    const saved = await k8sdockside.storage?.get(SETTINGS_KEY).catch(() => null);
+    return normaliseSettings(saved);
+  }
   async function connect(addresses) {
-    const out = { ready: false, reason: "", fix: "", status: null, contexts: [], context: "", chosen: false };
+    const settings = await loadSettings();
+    const learned = await k8sdockside.storage?.get(LEARNED_KEY).catch(() => null);
+    const out = {
+      ready: false,
+      reason: "",
+      fix: "",
+      status: null,
+      contexts: [],
+      context: "",
+      chosen: false,
+      settings,
+      learned: learned && typeof learned === "object" ? learned : {}
+    };
     if (!k8sdockside.tools) {
       return { ...out, fix: "app", reason: "Talos needs K8s Dockside 0.1.23 or newer, which can run talosctl for a plugin. The board below is what Kubernetes knows." };
     }
@@ -241,7 +589,7 @@
     const saved = await k8sdockside.storage?.get(CONTEXT_KEY).catch(() => null);
     const picked = out.contexts.find((c) => c.name === saved);
     out.chosen = !!picked;
-    out.context = (picked ?? matchContext(out.contexts, addresses))?.name ?? "";
+    out.context = (picked ?? matchContext(out.contexts, [...addresses, ...Object.values(out.learned).flat()]))?.name ?? "";
     out.ready = out.context !== "";
     if (!out.ready) return { ...out, fix: "context", reason: "Pick the talosconfig context for this cluster." };
     return out;
@@ -257,13 +605,59 @@
     await tools().forgetFile(TOOL, "config");
     await k8sdockside.storage?.remove(CONTEXT_KEY).catch(() => null);
   }
+  function contextOf(conn) {
+    return conn?.contexts.find((c) => c.name === conn.context) ?? null;
+  }
+  function addressed(machines, conn) {
+    return conn ? withAddresses(withTalosAddresses(machines, conn.learned), conn.settings, contextOf(conn)) : machines;
+  }
+  async function learnAddresses(conn, machines) {
+    if (!conn.ready) return false;
+    const ask = machines.filter((m) => m.externalFrom !== "kubernetes");
+    if (!ask.length) return false;
+    const answers = await Promise.all(ask.map(async (m) => {
+      const tries = [...new Set([m.address, ...m.external, ...m.internal].filter(Boolean))].sort((a, b) => Number(isPublicIP(b)) - Number(isPublicIP(a)));
+      for (const at of tries) {
+        try {
+          const out = await tools().exec(TOOL, ["get", "nodeaddress", "current-no-k8s", "--output", "json", ...targetAt(conn, at)]);
+          const items = parseResources(out.stdout);
+          if (items.length) return [m.name, publicAddresses(items[0].spec.addresses ?? [])];
+        } catch {
+        }
+      }
+      return [m.name, null];
+    }));
+    const next = { ...conn.learned };
+    for (const [name, ips] of answers) {
+      if (ips === null) continue;
+      if (ips.length) next[name] = ips;
+      else delete next[name];
+    }
+    const names = new Set(machines.map((m) => m.name));
+    for (const name of Object.keys(next)) if (!names.has(name)) delete next[name];
+    if (JSON.stringify(next) === JSON.stringify(conn.learned)) return false;
+    conn.learned = next;
+    await k8sdockside.storage?.set(LEARNED_KEY, next).catch(() => null);
+    return true;
+  }
+  function targetAt(conn, address) {
+    const out = target(conn, [address]);
+    if (!out.includes("--endpoints") && !contextOf(conn)?.endpoints.length) out.push("--endpoints", address);
+    return out;
+  }
   function target(conn, nodes) {
     const out = ["--context", conn.context];
+    const endpoints = endpointsFor(conn.settings, nodes);
+    if (endpoints.length) out.push("--endpoints", endpoints.join(","));
     if (nodes.length) out.push("--nodes", nodes.join(","));
     return out;
   }
+  async function exec(conn, args, nodes) {
+    return tools().exec(TOOL, [...args, ...target(conn, nodes)]);
+  }
   async function getOne(conn, resource, node) {
-    const out = await tools().exec(TOOL, ["get", resource, "--output", "json", ...target(conn, [node])]);
+    if (!node) throw new Error("no address for this machine -- pick one in Settings");
+    const out = await exec(conn, ["get", resource, "--output", "json"], [node]);
     const items = parseResources(out.stdout);
     if (out.code !== 0 && items.length === 0) throw new Error(shortError(out.stderr || `talosctl exited with ${out.code}`));
     return items;
@@ -277,8 +671,16 @@
     );
     return new Map(answers);
   }
+  var INSTALL_IMAGE = "machine.install.image";
+  async function installImage(conn, node) {
+    const extract = k8sdockside.tools?.extract;
+    if (!extract || !node) return null;
+    const found = await extract(TOOL, ["get", "machineconfig", ...target(conn, [node])]);
+    const value = (found.find((f) => f.node === node) ?? found[0])?.fields[INSTALL_IMAGE];
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  }
   async function text(conn, args, nodes) {
-    const out = await tools().exec(TOOL, [...args, ...target(conn, nodes)]);
+    const out = await exec(conn, args, nodes);
     if (out.code !== 0 && !out.stdout.trim()) throw new Error(shortError(out.stderr || `talosctl exited with ${out.code}`));
     return out.stdout.replace(/\s+$/, "") + (out.truncated ? "\n… (cut)" : "");
   }
@@ -302,6 +704,13 @@
   }
   function message(err) {
     return err instanceof Error ? err.message : String(err);
+  }
+  function dashboardLabel(count, picked) {
+    if (count === 1) return "Dashboard · 1 machine";
+    return picked ? `Dashboard · ${count} picked` : `Dashboard · all ${count} machines`;
+  }
+  function dashboardTitle(nodes) {
+    return `talosctl dashboard --nodes ${nodes.join(",")}, in the dock, or in your own terminal if Settings → Terminal says so. Switch machine with ← and →.`;
   }
 
   // src/ui/common.ts
@@ -327,6 +736,13 @@
     const s = standing(v);
     return el("span", { class: `badge v-${s}`, title: STANDING_TEXT[s] }, v ? v.raw : "not Talos");
   }
+  var ADDRESS_FROM = {
+    talosconfig: "The address the talosconfig names for this machine",
+    external: "The machine’s ExternalIP",
+    internal: "The machine’s InternalIP",
+    custom: "The address you set in Settings",
+    none: "Kubernetes lists no address for this machine: set one in Settings"
+  };
   function dot(tone, title = "") {
     return el("span", { class: `dot tone-${tone}`, title, "aria-hidden": "true" });
   }
@@ -350,10 +766,30 @@
     return k8sdockside.format?.time(date) ?? date.toLocaleTimeString();
   }
 
+  // src/ui/shell.ts
+  var PAGES = [
+    ["overview", "Board"],
+    ["dashboard", "Dashboard"],
+    ["extensions", "Extensions"],
+    ["settings", "Settings"]
+  ];
+  function pageNav(here) {
+    return el(
+      "nav",
+      { class: "pages", "aria-label": "Talos pages" },
+      ...PAGES.map(([id, label]) => id === here ? el("span", { class: "page-link on", "aria-current": "page" }, label) : button(label, () => void k8sdockside.openView(id), { class: "page-link" }))
+    );
+  }
+  function shortPath(path) {
+    return path.replace(/^\/(home|Users)\/[^/]+/, "~");
+  }
+
   // src/pages/fleet.ts
   var LIVE_EVERY = 2e4;
   var state = {
     contextName: "",
+    /** The machines as Kubernetes lists them, before the settings pick their addresses. */
+    listed: [],
     machines: [],
     conn: null,
     connecting: false,
@@ -363,18 +799,28 @@
     /** What a drawer tab read, by machine and tab, so switching back does not read again. */
     drawer: /* @__PURE__ */ new Map(),
     logService: "kubelet",
-    k8sTarget: ""
+    k8sTarget: "",
+    /** What the machine list beside an open machine is filtered by. */
+    railQuery: "",
+    /** Whether long lines in a tab's output wrap, rather than scroll sideways. */
+    wrap: false
   };
   async function start() {
     const ctx = await k8sdockside.ready();
     state.contextName = ctx.contextName;
     const focus = await takeHandOver();
     if (focus) state.selected = focus;
+    void loadReleases().then((changed) => {
+      if (!changed || !state.listed.length) return;
+      for (const [k, v] of [...state.drawer]) if (k.endsWith("/overview") && !(v instanceof Promise)) state.drawer.delete(k);
+      render();
+    });
     let first = true;
     k8sdockside.watch(
       { kind: "nodes", interval: 15e3 },
       (items) => {
-        state.machines = sortMachines(items.map(machineOf));
+        state.listed = sortMachines(items.map(machineOf));
+        state.machines = addressed(state.listed, state.conn);
         render();
         if (first) {
           first = false;
@@ -388,7 +834,10 @@
   async function reconnect() {
     state.connecting = true;
     render();
-    state.conn = await connect(state.machines.map((m) => m.address).filter(Boolean));
+    state.conn = await connect(allAddresses(state.listed));
+    state.machines = addressed(state.listed, state.conn);
+    await learnAddresses(state.conn, state.machines);
+    state.machines = addressed(state.listed, state.conn);
     state.connecting = false;
     state.drawer.clear();
     render();
@@ -424,18 +873,22 @@
   function render() {
     clearError();
     const selected = state.machines.find((m) => m.name === state.selected) ?? null;
+    const typing = document.activeElement instanceof HTMLInputElement && document.activeElement.id === RAIL_SEARCH ? { start: document.activeElement.selectionStart, end: document.activeElement.selectionEnd } : null;
     replace(
       byId("main"),
       header(),
       connectionBar(),
-      runway(),
-      el(
-        "div",
-        { class: selected ? "layout with-drawer" : "layout" },
-        el("div", { class: "board" }, ...groups()),
-        selected ? drawer(selected) : null
-      )
+      // One machine open is the machine at full width, with every machine
+      // in a list beside it -- a board of tiles next to a drawer leaves
+      // neither enough room once there are more than a handful.
+      selected ? el("div", { class: "layout focus" }, rail(selected), drawer(selected)) : el("div", {}, runway(), el("div", { class: "layout" }, el("div", { class: "board" }, ...groups())))
     );
+    if (typing) {
+      const input = document.getElementById(RAIL_SEARCH);
+      input?.focus();
+      input?.setSelectionRange(typing.start, typing.end);
+    }
+    document.querySelector(".rail-item.on")?.scrollIntoView({ block: "nearest" });
   }
   function header() {
     const talos = state.machines.filter((m) => m.talos);
@@ -457,6 +910,7 @@
           )
         )
       ),
+      pageNav("overview"),
       el(
         "div",
         { class: "head-actions" },
@@ -466,6 +920,11 @@
         button("Refresh", () => void readLive(true), { class: "btn ghost", title: state.live.at ? `Read at ${when(state.live.at)}` : "" })
       )
     );
+  }
+  function allDashboard() {
+    const nodes = state.machines.map((m) => m.address).filter(Boolean);
+    if (!state.conn || !nodes.length) return null;
+    return button(dashboardLabel(nodes.length, false), () => void dashboard(state.conn, nodes).catch(showError), { class: "btn primary", title: dashboardTitle(nodes) });
   }
   function connectionBar() {
     const c = state.conn;
@@ -484,7 +943,8 @@
           el("div", { class: "dim small" }, c.reason)
         ),
         c.fix === "config" || c.fix === "context" ? button("Choose talosconfig…", () => void chooseConfig().then(reconnect).catch(showError), { class: "btn primary" }) : null,
-        c.fix !== "app" ? button("Try again", () => void reconnect(), { class: "btn ghost" }) : null
+        c.fix !== "app" ? button("Try again", () => void reconnect(), { class: "btn ghost" }) : null,
+        c.fix !== "app" ? button("Settings", () => void k8sdockside.openView("settings"), { class: "btn ghost" }) : null
       );
     }
     const file = c.status?.files[0];
@@ -509,7 +969,11 @@
       el("span", { class: "sep" }),
       el("span", { class: "dim" }, "context "),
       select2,
+      c.settings.endpoints.use !== "config" ? el("span", { class: "sep" }) : null,
+      c.settings.endpoints.use === "node" ? el("span", { class: "dim", title: "Set in Settings" }, "endpoints: each machine") : c.settings.endpoints.use === "custom" ? el("span", { class: "dim", title: "Set in Settings" }, "endpoints ", el("span", { class: "mono" }, c.settings.endpoints.custom.join(", "))) : null,
       el("span", { class: "grow" }),
+      allDashboard(),
+      button("Settings", () => void k8sdockside.openView("settings"), { class: "link", title: "talosconfig, endpoints and the address talosctl uses for each machine" }),
       button("Change…", () => void chooseConfig().then(reconnect).catch(showError), { class: "link" }),
       file?.source === "configured" ? button("Use default", () => void forgetConfig().then(reconnect).catch(showError), { class: "link" }) : null
     );
@@ -526,9 +990,6 @@
         return "talosctl is not available here";
     }
   }
-  function shortPath(path) {
-    return path.replace(/^\/(home|Users)\/[^/]+/, "~");
-  }
   function runway() {
     const talos = state.machines.filter((m) => m.talos);
     const byMinor = /* @__PURE__ */ new Map();
@@ -536,8 +997,9 @@
       const k = minorOf(m.talos);
       byMinor.set(k, [...byMinor.get(k) ?? [], m]);
     }
-    const older = talos.filter((m) => !RELEASES.some((r) => r.minor === minorOf(m.talos)));
-    const stops = RELEASES.map((r) => {
+    const lines = releases();
+    const older = talos.filter((m) => !lines.some((r) => r.minor === minorOf(m.talos)));
+    const stops = lines.map((r) => {
       const here = byMinor.get(r.minor) ?? [];
       return el(
         "div",
@@ -573,7 +1035,8 @@
         "div",
         { class: "runway-head" },
         el("h2", {}, "Version runway"),
-        el("span", { class: "dim" }, verdict(talos))
+        el("span", { class: "dim" }, verdict(talos)),
+        el("span", { class: "faint small", title: releasesTitle() }, `Releases ${releasesText()}`)
       ),
       el(
         "div",
@@ -591,7 +1054,7 @@
   }
   function verdict(talos) {
     if (!talos.length) return "No machine reports Talos as its OS.";
-    const latest = LATEST_STABLE.latest;
+    const latest = latestStable().latest;
     const behind = talos.filter((m) => ["behind", "patch", "unsupported"].includes(standing(m.talos)));
     const ahead = talos.filter((m) => standing(m.talos) === "ahead");
     if (!behind.length && !ahead.length) return `All ${talos.length} on ${latest}, the latest stable.`;
@@ -631,7 +1094,7 @@
       { class: "svc-bar", title: services.map((s) => `${s.metadata.id}: ${serviceHealth(s.spec)}`).join("\n") },
       ...services.map((s) => el("span", { class: `seg h-${serviceHealth(s.spec)}` }))
     ) : null;
-    const healthy = services?.filter((s) => serviceHealth(s.spec) === "healthy").length ?? 0;
+    const healthy = services?.filter((s) => serviceOk(s.spec)).length ?? 0;
     const card = el(
       "div",
       {
@@ -647,14 +1110,14 @@
         el("strong", { class: "grow ellipsis" }, m.name),
         versionBadge(m.talos)
       ),
-      el("div", { class: "mono faint small" }, m.address || "no address", m.cordoned ? el("span", { class: "chip warn" }, "cordoned") : null),
+      el("div", { class: "mono faint small", title: ADDRESS_FROM[m.addressFrom] }, m.address || "no address", m.cordoned ? el("span", { class: "chip warn" }, "cordoned") : null),
       el(
         "div",
         { class: "tile-stage small" },
         err ? el("span", { class: "tone-error" }, err) : stage ? el("span", {}, stage, status?.status?.ready === false ? el("span", { class: "tone-warn" }, " · not ready") : null) : el("span", { class: "faint" }, state.conn?.ready ? "…" : m.ready ? "Ready in Kubernetes" : "NotReady in Kubernetes")
       ),
       healthBar,
-      services ? el("div", { class: "faint small" }, `${healthy}/${services.length} services healthy`) : null,
+      services ? el("div", { class: "faint small" }, `${healthy}/${services.length} services OK`) : null,
       el(
         "div",
         { class: "tile-foot small" },
@@ -675,6 +1138,102 @@
   function select(name) {
     state.selected = state.selected === name ? "" : name;
     render();
+  }
+  var RAIL_SEARCH = "rail-search";
+  function railMachines() {
+    const q = state.railQuery.trim().toLowerCase();
+    return q ? state.machines.filter((m) => m.name.toLowerCase().includes(q) || m.address.includes(q)) : state.machines;
+  }
+  function step(by) {
+    const list = railMachines();
+    if (!list.length) return;
+    const at = list.findIndex((m) => m.name === state.selected);
+    const next = list[(at + by + list.length) % list.length];
+    state.selected = next.name;
+    render();
+  }
+  function rail(selected) {
+    const list = railMachines();
+    const search = el("input", {
+      id: RAIL_SEARCH,
+      type: "search",
+      class: "rail-search",
+      placeholder: `Find among ${state.machines.length}…`,
+      "aria-label": "Find a machine by name or address",
+      spellcheck: "false",
+      "data-k8sdockside-keep": "off"
+    });
+    search.value = state.railQuery;
+    on(search, "input", () => {
+      state.railQuery = search.value;
+      render();
+    });
+    on(search, "keydown", (e) => {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        step(e.key === "ArrowDown" ? 1 : -1);
+      } else if (e.key === "Enter" && list.length && !list.some((m) => m.name === selected.name)) {
+        state.selected = list[0].name;
+        render();
+      } else if (e.key === "Escape") {
+        if (state.railQuery) state.railQuery = "";
+        else state.selected = "";
+        render();
+      }
+    });
+    const cp = list.filter((m) => m.controlPlane);
+    const workers = list.filter((m) => !m.controlPlane);
+    const section = (title, ms) => ms.length ? [el("div", { class: "rail-group" }, title, el("span", { class: "faint" }, ` ${ms.length}`)), ...ms.map((m) => railItem(m, selected))] : [];
+    return el(
+      "nav",
+      { class: "rail card", "aria-label": "Machines" },
+      el(
+        "div",
+        { class: "rail-head" },
+        button("← Board", () => {
+          state.selected = "";
+          render();
+        }, { class: "link small", title: "Back to every machine as tiles (Esc)" }),
+        el("span", { class: "grow" }),
+        el("span", { class: "faint small" }, list.length === state.machines.length ? `${list.length}` : `${list.length} of ${state.machines.length}`)
+      ),
+      search,
+      el(
+        "div",
+        { class: "rail-list", role: "listbox" },
+        ...section("Control plane", cp),
+        ...section("Workers", workers),
+        list.length ? null : el("p", { class: "faint small rail-empty" }, "No machine matches.")
+      ),
+      el("div", { class: "faint small rail-hint" }, "↑ ↓ in the search box move between machines")
+    );
+  }
+  function railItem(m, selected) {
+    const status = itemsOf(state.live.status, m.address)?.[0]?.spec;
+    const services = itemsOf(state.live.services, m.address);
+    const err = errorOf(m.address);
+    const stage = status?.stage ?? "";
+    const bad = services?.filter((s) => !serviceOk(s.spec)).length ?? 0;
+    const on_ = m.name === selected.name;
+    const item = el(
+      "button",
+      {
+        type: "button",
+        class: `rail-item${on_ ? " on" : ""}`,
+        role: "option",
+        "aria-selected": on_ ? "true" : "false",
+        title: [m.address || "no address", err || stage || (m.ready ? "Ready" : "Not ready"), bad ? `${bad} service${bad === 1 ? "" : "s"} not OK` : ""].filter(Boolean).join(" · ")
+      },
+      dot(err ? "error" : stage ? stageTone(stage) : m.ready ? "ok" : "error"),
+      el("span", { class: "grow ellipsis" }, m.name),
+      bad ? el("span", { class: "chip warn" }, String(bad)) : null,
+      el("span", { class: `rail-ver v-${standing(m.talos)}` }, m.talos?.raw ?? "")
+    );
+    on(item, "click", () => {
+      state.selected = m.name;
+      render();
+    });
+    return item;
   }
   var TABS = [
     ["overview", "Overview"],
@@ -699,15 +1258,17 @@
           "div",
           { class: "grow" },
           el("h2", {}, m.name, " ", versionBadge(m.talos)),
-          el("div", { class: "dim small mono" }, `${m.address} · ${m.controlPlane ? "control plane" : "worker"} · ${m.kernel}`)
+          el("div", { class: "dim small mono", title: ADDRESS_FROM[m.addressFrom] }, `${m.address || "no address"} · ${m.controlPlane ? "control plane" : "worker"} · ${m.kernel}`)
         ),
-        button("✕", () => select(m.name), { class: "icon-btn", title: "Close", "aria-label": "Close" })
+        railMachines().length > 1 ? button("‹", () => step(-1), { class: "icon-btn", title: "Previous machine", "aria-label": "Previous machine" }) : null,
+        railMachines().length > 1 ? button("›", () => step(1), { class: "icon-btn", title: "Next machine", "aria-label": "Next machine" }) : null,
+        button("✕", () => select(m.name), { class: "icon-btn", title: "Back to the board", "aria-label": "Close" })
       ),
       el(
         "div",
         { class: "drawer-actions" },
         ready ? button("Console", () => void console(state.conn, m).catch(showError), { class: "btn" }) : null,
-        ready ? button("Dashboard ↗", () => void dashboard(state.conn, [m.address]).catch(showError), { class: "btn", title: "talosctl dashboard, in your own terminal" }) : null,
+        ready ? button("Dashboard", () => void dashboard(state.conn, [m.address]).catch(showError), { class: "btn", title: dashboardTitle([m.address]) }) : null,
         button("Kubernetes node", () => void k8sdockside.open({ kind: "nodes", name: m.name }), { class: "btn ghost" }),
         el("span", { class: "grow" }),
         ready ? button("Reboot…", () => void reboot(m), { class: "btn danger-outline" }) : null,
@@ -730,7 +1291,7 @@
   function body(m) {
     const key = `${m.name}/${state.tab}${state.tab === "logs" ? "/" + state.logService : ""}`;
     const kept = state.drawer.get(key);
-    if (kept instanceof Promise) return loading();
+    if (kept instanceof Promise) return loading2();
     if (kept) return kept;
     const reading = readTab(m, state.tab).then(
       (content) => void state.drawer.set(key, content),
@@ -739,9 +1300,9 @@
       if (state.selected === m.name) render();
     });
     state.drawer.set(key, reading);
-    return loading();
+    return loading2();
   }
-  function loading() {
+  function loading2() {
     return el("div", { class: "loading" }, el("span", { class: "pulse" }), " Asking the machine…");
   }
   function refreshTab(m) {
@@ -772,7 +1333,15 @@
     }
   }
   function pre(content, ...extra) {
-    return el("div", {}, el("div", { class: "tab-tools" }, ...extra), el("pre", { class: "out" }, content || "(nothing)"));
+    const wrap = el("label", { class: "small check" }, el("input", { type: "checkbox", "data-k8sdockside-keep": "off" }), " Wrap lines");
+    const box = wrap.querySelector("input");
+    box.checked = state.wrap;
+    const out = el("pre", { class: `out${state.wrap ? " wrap" : ""}` }, content || "(nothing)");
+    on(box, "change", () => {
+      state.wrap = box.checked;
+      out.classList.toggle("wrap", state.wrap);
+    });
+    return el("div", {}, el("div", { class: "tab-tools" }, wrap, el("span", { class: "grow" }), ...extra), out);
   }
   function stripNode(out, node) {
     const prefix = node + ": ";
@@ -786,11 +1355,16 @@
     return el("dl", { class: "kv" }, ...rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v ?? "—")]));
   }
   async function overview(m, conn) {
-    const [info, procs, mem, time] = await Promise.all([
+    const [info, procs, mem, time, factory, platform, configImage] = await Promise.all([
       getOne(conn, "systeminformation", m.address).catch(() => []),
       getOne(conn, "processors", m.address).catch(() => []),
       getOne(conn, "memorymodules", m.address).catch(() => []),
-      getOne(conn, "timestatus", m.address).catch(() => [])
+      getOne(conn, "timestatus", m.address).catch(() => []),
+      getOne(conn, "imagefactoryschematic", m.address).catch(() => []),
+      getOne(conn, "platformmetadata", m.address).catch(() => []),
+      // machine.install.image, read by the app out of the machine config;
+      // the rest of the config never reaches this page.
+      installImage(conn, m.address).catch(() => null)
     ]);
     const ext = itemsOf(state.live.extensions, m.address) ?? [];
     const sec = itemsOf(state.live.security, m.address)?.[0]?.spec;
@@ -799,10 +1373,11 @@
     const cores = procs.reduce((n, p) => n + Number(p.spec.threadCount ?? p.spec.coreCount ?? 0), 0);
     const memMiB = mem.reduce((n, d) => n + (d.spec.sizeMiB ?? 0), 0);
     const schematic = schematicOf(ext);
+    const source = installSource(factory[0]?.spec, platform[0]?.spec, sec?.secureBoot, schematic, configImage);
     return el(
       "div",
       { class: "stack" },
-      upgradePanel(m, schematic),
+      upgradePanel(m, source),
       status?.status?.unmetConditions?.length ? el("div", { class: "callout warn" }, el("strong", {}, "Not ready: "), status.status.unmetConditions.map((c) => `${c.name} (${c.reason})`).join(", ")) : null,
       el("h4", {}, "Machine"),
       kv([
@@ -824,44 +1399,143 @@
       schematic ? el("p", { class: "faint small mono", title: "Image Factory schematic" }, `schematic ${schematic.slice(0, 16)}…`) : null
     );
   }
-  function upgradePanel(m, schematic) {
+  var withPrereleases = false;
+  var KIND_TEXT = { patch: "patch", minor: "next minor", prerelease: "pre-release" };
+  function upgradePanel(m, src) {
     const next = nextUpgrade(m.talos);
-    const versions = RELEASES.map((r) => r.latest).filter((v) => !m.talos || parseVersion(v).raw !== m.talos.raw);
+    const stable = latestStable();
+    const s = standing(m.talos);
+    const head = el(
+      "div",
+      { class: "upgrade-head" },
+      el("strong", {}, next ? `Upgrade available: ${next.latest}` : s === "current" ? `On the latest stable, ${stable.latest}` : STANDING_TEXT[s]),
+      next && next.latest !== stable.latest ? el("span", { class: "faint small" }, ` · then ${stable.latest}`) : null,
+      el("span", { class: "faint small", title: releasesTitle() }, ` · releases ${releasesText()}`)
+    );
+    const pre2 = el("label", { class: "small check" }, el("input", { type: "checkbox", "data-k8sdockside-keep": "off" }), " Show pre-releases (alpha, beta, rc)");
+    const preBox = pre2.querySelector("input");
+    preBox.checked = withPrereleases;
+    on(preBox, "change", () => {
+      withPrereleases = preBox.checked;
+      preBox.closest(".upgrade")?.replaceWith(upgradePanel(m, src));
+    });
+    const sourceLine = el(
+      "p",
+      { class: "faint small", title: sourceTitle(src) },
+      sourceText(src),
+      src.note ? el("span", { class: "tone-warn" }, " " + src.note) : null,
+      src.known ? null : src.from === "machine" ? el("span", { class: "tone-warn" }, " Factory or platform could not be read from the machine and is assumed; check the image.") : null
+    );
+    const options = upgradeOptions(m.talos, withPrereleases);
+    const held = withPrereleases ? heldBackPrereleases(m.talos) : [];
+    const heldLine = held.length ? el("p", { class: "small tone-warn" }, held.map((h) => `${h.version} is not offered: ${h.reason}.`).join(" ")) : withPrereleases && !options.some((o) => o.kind === "prerelease") ? el("p", { class: "faint small" }, "No pre-release newer than this machine.") : null;
+    if (!options.length) {
+      return el(
+        "div",
+        { class: `upgrade card-inner v-${s}` },
+        head,
+        el("p", { class: "dim small" }, m.talos ? `Nothing newer to upgrade ${m.talos.raw} to${withPrereleases ? "" : " among stable releases"}. Downgrades are not offered.` : "The Talos version is not known."),
+        el("div", { class: "row" }, pre2),
+        heldLine,
+        sourceLine
+      );
+    }
     const pick = el(
       "select",
       { "aria-label": "Talos version", "data-k8sdockside-keep": "off" },
-      ...versions.map((v) => {
-        const o = el("option", { value: v }, v + (v === next?.latest ? " (next step)" : v === LATEST_STABLE.latest ? " (latest)" : ""));
-        o.selected = v === (next?.latest ?? LATEST_STABLE.latest);
-        return o;
+      ...options.map((o) => {
+        const opt = el("option", { value: o.version }, `${o.version} · ${KIND_TEXT[o.kind]}${o.next ? " (next step)" : ""}`);
+        opt.selected = o.next;
+        return opt;
       })
     );
     const image = el("input", { type: "text", class: "mono grow", "aria-label": "Installer image", spellcheck: "false", "data-k8sdockside-keep": "off" });
-    image.value = installerImage(pick.value, schematic);
-    on(pick, "change", () => image.value = installerImage(pick.value, schematic));
-    const s = standing(m.talos);
+    const go = button("Upgrade…", () => void upgrade(), { class: "btn primary" });
+    const care = el("div", {});
+    const problem = el("p", { class: "small tone-error", hidden: true });
+    let ack = null;
+    const chosen = () => options.find((o) => o.version === pick.value);
+    const check = () => {
+      const tagged = imageVersion(image.value.trim());
+      const wrong = !tagged ? "The image needs a version tag, like :v1.14.5." : m.talos && compareVersions(tagged, m.talos) <= 0 ? `${tagged.raw} is not newer than ${m.talos.raw}: downgrades are not offered.` : "";
+      problem.textContent = wrong;
+      problem.hidden = !wrong;
+      go.disabled = !!wrong || ack !== null && !ack.checked;
+    };
+    const choose = () => {
+      const o = chosen();
+      image.value = installerImage(o.version, src);
+      ack = null;
+      if (o.kind === "patch") {
+        replace(care);
+      } else {
+        const to = parseVersion(o.version);
+        const line = `${to.major}.${to.minor}`;
+        const notes = `https://github.com/siderolabs/talos/releases/tag/${o.version}`;
+        const guide = `https://www.talos.dev/v${line}/talos-guides/upgrading-talos/`;
+        const box = el("input", { type: "checkbox", "data-k8sdockside-keep": "off" });
+        on(box, "change", check);
+        ack = box;
+        replace(care, el(
+          "div",
+          { class: `callout ${o.kind === "prerelease" ? "error" : "warn"}` },
+          o.kind === "prerelease" ? el("p", {}, el("strong", {}, `${o.version} is a pre-release. `), "Alpha, beta and rc releases are experimental: they can break the machine, and are not for clusters anyone depends on.") : el(
+            "p",
+            {},
+            el("strong", {}, `A new minor release, ${m.talos ? `${m.talos.major}.${m.talos.minor}` : ""} → ${line}. `),
+            "A minor can change a great deal: the machine config’s format and multi-document configs, options removed or renamed, new defaults. Read its upgrade notes before upgrading, and upgrade one machine first."
+          ),
+          el(
+            "p",
+            { class: "small" },
+            button("Release notes ↗", () => void k8sdockside.openUrl(notes), { class: "link" }),
+            " · ",
+            button(`Upgrading Talos ${line} ↗`, () => void k8sdockside.openUrl(guide), { class: "link" })
+          ),
+          el(
+            "label",
+            { class: "small check" },
+            box,
+            o.kind === "prerelease" ? ` I understand ${o.version} is experimental, and want it on ${m.name}` : ` I have read the ${line} upgrade notes`
+          )
+        ));
+      }
+      check();
+    };
+    const upgrade = async () => {
+      const o = chosen();
+      await run(state.conn, ["upgrade", "--image", image.value.trim()], m, {
+        title: `Upgrade ${m.name} to ${o.version}${o.kind === "patch" ? "" : o.kind === "minor" ? " (new minor release)" : " (pre-release)"}`,
+        danger: true,
+        confirm: m.name
+      }).catch(declined);
+    };
+    on(pick, "change", choose);
+    on(image, "input", check);
+    choose();
     return el(
       "div",
       { class: `upgrade card-inner v-${s}` },
-      el(
-        "div",
-        { class: "upgrade-head" },
-        el("strong", {}, next ? `Upgrade available: ${next.latest}` : s === "current" ? "On the latest stable" : STANDING_TEXT[s]),
-        next && next !== LATEST_STABLE ? el("span", { class: "faint small" }, ` · then ${LATEST_STABLE.latest}`) : null
-      ),
-      el(
-        "div",
-        { class: "row" },
-        pick,
-        image,
-        button("Upgrade…", () => void run(state.conn, ["upgrade", "--image", image.value.trim()], m, {
-          title: `Upgrade ${m.name} to ${pick.value}`,
-          danger: true,
-          confirm: m.name
-        }).catch(declined), { class: "btn primary" })
-      ),
-      el("p", { class: "faint small" }, schematic ? "The installer keeps this machine’s Image Factory schematic, and so its extensions. The machine drains, upgrades and reboots; watch it in the console." : "No Image Factory schematic: the stock installer is used. Change the image if this machine needs extensions.")
+      head,
+      el("div", { class: "row" }, pick, image, go),
+      problem,
+      care,
+      el("div", { class: "row" }, pre2),
+      heldLine,
+      sourceLine,
+      el("p", { class: "faint small" }, src.schematic ? "The installer keeps this machine’s factory, installer and schematic -- and so its extensions -- and changes only the version. The machine drains, upgrades and reboots; watch it in the console." : src.repository ? "The installer is the one the machine config names, with only the version changed. Change the image if this machine needs extensions." : "Change the image if this machine needs extensions or was installed from an installer of your own.")
     );
+  }
+  function sourceText(src) {
+    const schematic = src.schematic ? ` · schematic ${src.schematic.slice(0, 12)}… ${src.schematicFrom === "machine" ? "from the running machine" : "from the install image (as first installed)"}` : "";
+    if (src.from === "config") {
+      return src.repository ? `Installer ${src.repository} from the machine config’s install image · version changed only` : `Installer ${src.factory}/${src.variant} from the machine config’s install image${schematic}`;
+    }
+    return src.schematic ? `Installer from ${src.factory} · ${src.variant}${schematic}` : "No Image Factory schematic: the stock installer.";
+  }
+  function sourceTitle(src) {
+    const reads = "imagefactoryschematic for the schematic it runs";
+    return src.from === "config" ? `Host and installer from machine.install.image, which the app reads out of the machine config for this plugin -- the plugin never sees the rest of the config. That image is the one the machine was first installed from (${src.configImage}); Talos does not update it on upgrade, so the schematic is read from the machine (${reads}) and the version is the one you pick.` : `Read from the machine (${reads}, platformmetadata, securitystate). The machine config's install image could not be read -- this needs K8s Dockside 0.1.33 or newer -- so the platform's installer is assumed from the platform Talos detected at boot.`;
   }
   async function servicesTab(m, conn) {
     const services = await getOne(conn, "services", m.address);
@@ -880,7 +1554,7 @@
             "tr",
             {},
             el("td", { class: "mono" }, id),
-            el("td", {}, dot(h === "healthy" ? "ok" : h === "running" ? "info" : h === "stopped" ? "error" : "warn"), " ", h),
+            el("td", {}, dot(h === "healthy" || h === "running" ? "ok" : h === "stopped" ? "error" : "warn"), " ", h === "running" ? "running (no health check)" : h),
             el(
               "td",
               { class: "right" },
@@ -1011,7 +1685,7 @@
     if (!cp || !state.conn) return;
     showModal("Cluster health", el("div", { class: "loading" }, el("span", { class: "pulse" }), ` Running talosctl health from ${cp.name}…`));
     try {
-      const out = await k8sdockside.tools.exec("talosctl", ["health", "--wait-timeout", "25s", "--context", state.conn.context, "--nodes", cp.address]);
+      const out = await exec(state.conn, ["health", "--wait-timeout", "25s"], [cp.address]);
       showModal("Cluster health", el(
         "div",
         {},

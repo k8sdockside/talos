@@ -4,16 +4,18 @@
 
 import { button, byId, el, replace, svg, type Child } from '@k8sdockside/plugin-sdk/dom';
 import {
-    LATEST_STABLE,
-    RELEASES,
+    allAddresses,
     installerImage,
+    latestStable,
     machineOf,
     minorOf,
     nextUpgrade,
     parseVersion,
     realExtensions,
+    releases,
     schematicOf,
     serviceHealth,
+    serviceOk,
     sortMachines,
     stageTone,
     standing,
@@ -24,22 +26,39 @@ import {
     type Resource,
     type SecuritySpec,
     type ServiceSpec,
+    imageVersion,
+    installSource,
+    upgradeOptions,
+    type FactorySpec,
+    type PlatformSpec,
+    type InstallSource,
+    type UpgradeOption,
+    compareVersions,
+    heldBackPrereleases,
 } from '../model/talos';
 import { TALOS_LOGO } from '../ui/logo';
-import { STANDING_TEXT, clearError, dot, on, showError, takeHandOver, versionBadge, when } from '../ui/common';
+import { loadReleases, releasesText, releasesTitle } from '../ui/releases';
+import { pageNav, shortPath } from '../ui/shell';
+import { ADDRESS_FROM, STANDING_TEXT, clearError, dot, on, showError, takeHandOver, versionBadge, when } from '../ui/common';
 import {
+    addressed,
     chooseConfig,
     connect,
     console as openConsole,
     dashboard,
+    dashboardLabel,
+    dashboardTitle,
+    exec,
     forgetConfig,
     getEach,
     getOne,
+    installImage,
     message,
     run,
     text,
     useContext,
     type Connection,
+    learnAddresses,
 } from '../ui/talos';
 
 /** How often the live parts -- stage and services -- are read again. */
@@ -57,6 +76,8 @@ interface Live {
 
 const state = {
     contextName: '',
+    /** The machines as Kubernetes lists them, before the settings pick their addresses. */
+    listed: [] as Machine[],
     machines: [] as Machine[],
     conn: null as Connection | null,
     connecting: false,
@@ -67,6 +88,10 @@ const state = {
     drawer: new Map<string, Child | Promise<void>>(),
     logService: 'kubelet',
     k8sTarget: '',
+    /** What the machine list beside an open machine is filtered by. */
+    railQuery: '',
+    /** Whether long lines in a tab's output wrap, rather than scroll sideways. */
+    wrap: false,
 };
 
 // ----- reading ---------------------------------------------------------------------------
@@ -76,12 +101,20 @@ async function start(): Promise<void> {
     state.contextName = ctx.contextName;
     const focus = await takeHandOver();
     if (focus) state.selected = focus;
+    // The live release list, when the app can get it: drawn again once it is in.
+    void loadReleases().then((changed) => {
+        if (!changed || !state.listed.length) return;
+        // A machine's overview tab holds its upgrade panel, which names versions.
+        for (const [k, v] of [...state.drawer]) if (k.endsWith('/overview') && !(v instanceof Promise)) state.drawer.delete(k);
+        render();
+    });
 
     let first = true;
     k8sdockside.watch<K8sDockside.KubeObject>(
         { kind: 'nodes', interval: 15_000 },
         (items) => {
-            state.machines = sortMachines((items as unknown as NodeObject[]).map(machineOf));
+            state.listed = sortMachines((items as unknown as NodeObject[]).map(machineOf));
+            state.machines = addressed(state.listed, state.conn);
             render();
             if (first) {
                 first = false;
@@ -96,7 +129,12 @@ async function start(): Promise<void> {
 async function reconnect(): Promise<void> {
     state.connecting = true;
     render();
-    state.conn = await connect(state.machines.map((m) => m.address).filter(Boolean));
+    state.conn = await connect(allAddresses(state.listed));
+    state.machines = addressed(state.listed, state.conn);
+    // Public addresses Kubernetes does not know (Hetzner and other clouds
+    // without a cloud controller manager), asked of the machines themselves.
+    await learnAddresses(state.conn, state.machines);
+    state.machines = addressed(state.listed, state.conn);
     state.connecting = false;
     state.drawer.clear();
     render();
@@ -139,16 +177,28 @@ function errorOf(address: string): string {
 function render(): void {
     clearError();
     const selected = state.machines.find((m) => m.name === state.selected) ?? null;
+    // Everything is drawn again on each reading, and the machine list's search
+    // box with it: put the focus and the caret back where they were.
+    const typing = document.activeElement instanceof HTMLInputElement && document.activeElement.id === RAIL_SEARCH
+        ? { start: document.activeElement.selectionStart, end: document.activeElement.selectionEnd }
+        : null;
     replace(
         byId('main'),
         header(),
         connectionBar(),
-        runway(),
-        el('div', { class: selected ? 'layout with-drawer' : 'layout' },
-            el('div', { class: 'board' }, ...groups()),
-            selected ? drawer(selected) : null,
-        ),
+        // One machine open is the machine at full width, with every machine
+        // in a list beside it -- a board of tiles next to a drawer leaves
+        // neither enough room once there are more than a handful.
+        selected
+            ? el('div', { class: 'layout focus' }, rail(selected), drawer(selected))
+            : el('div', {}, runway(), el('div', { class: 'layout' }, el('div', { class: 'board' }, ...groups()))),
     );
+    if (typing) {
+        const input = document.getElementById(RAIL_SEARCH) as HTMLInputElement | null;
+        input?.focus();
+        input?.setSelectionRange(typing.start, typing.end);
+    }
+    document.querySelector('.rail-item.on')?.scrollIntoView({ block: 'nearest' });
 }
 
 function header(): HTMLElement {
@@ -164,6 +214,7 @@ function header(): HTMLElement {
                 ),
             ),
         ),
+        pageNav('overview'),
         el('div', { class: 'head-actions' },
             state.conn?.ready ? button('Console', () => void openConsole(state.conn!, null).catch(showError), { class: 'btn' }) : null,
             state.conn?.ready ? button('Health check', () => void healthCheck(), { class: 'btn' }) : null,
@@ -174,6 +225,13 @@ function header(): HTMLElement {
 }
 
 /** Which talosctl, talosconfig and context -- or what to do to get them. */
+/** talosctl dashboard for every machine that has an address, one button. */
+function allDashboard(): HTMLElement | null {
+    const nodes = state.machines.map((m) => m.address).filter(Boolean);
+    if (!state.conn || !nodes.length) return null;
+    return button(dashboardLabel(nodes.length, false), () => void dashboard(state.conn!, nodes).catch(showError), { class: 'btn primary', title: dashboardTitle(nodes) });
+}
+
 function connectionBar(): HTMLElement {
     const c = state.conn;
     if (state.connecting || !c) {
@@ -190,6 +248,7 @@ function connectionBar(): HTMLElement {
                 ? button('Choose talosconfig…', () => void chooseConfig().then(reconnect).catch(showError), { class: 'btn primary' })
                 : null,
             c.fix !== 'app' ? button('Try again', () => void reconnect(), { class: 'btn ghost' }) : null,
+            c.fix !== 'app' ? button('Settings', () => void k8sdockside.openView('settings'), { class: 'btn ghost' }) : null,
         );
     }
     const file = c.status?.files[0];
@@ -210,7 +269,15 @@ function connectionBar(): HTMLElement {
         el('span', { class: 'sep' }),
         el('span', { class: 'dim' }, 'context '),
         select,
+        c.settings.endpoints.use !== 'config' ? el('span', { class: 'sep' }) : null,
+        c.settings.endpoints.use === 'node'
+            ? el('span', { class: 'dim', title: 'Set in Settings' }, 'endpoints: each machine')
+            : c.settings.endpoints.use === 'custom'
+                ? el('span', { class: 'dim', title: 'Set in Settings' }, 'endpoints ', el('span', { class: 'mono' }, c.settings.endpoints.custom.join(', ')))
+                : null,
         el('span', { class: 'grow' }),
+        allDashboard(),
+        button('Settings', () => void k8sdockside.openView('settings'), { class: 'link', title: 'talosconfig, endpoints and the address talosctl uses for each machine' }),
         button('Change…', () => void chooseConfig().then(reconnect).catch(showError), { class: 'link' }),
         file?.source === 'configured' ? button('Use default', () => void forgetConfig().then(reconnect).catch(showError), { class: 'link' }) : null,
     );
@@ -229,10 +296,6 @@ function setupTitle(c: Connection): string {
     }
 }
 
-function shortPath(path: string): string {
-    return path.replace(/^\/(home|Users)\/[^/]+/, '~');
-}
-
 // ----- the version runway -----------------------------------------------------------------
 
 function runway(): HTMLElement {
@@ -242,9 +305,10 @@ function runway(): HTMLElement {
         const k = minorOf(m.talos!);
         byMinor.set(k, [...(byMinor.get(k) ?? []), m]);
     }
-    const older = talos.filter((m) => !RELEASES.some((r) => r.minor === minorOf(m.talos!)));
+    const lines = releases();
+    const older = talos.filter((m) => !lines.some((r) => r.minor === minorOf(m.talos!)));
 
-    const stops = RELEASES.map((r) => {
+    const stops = lines.map((r) => {
         const here = byMinor.get(r.minor) ?? [];
         return el('div', { class: `stop s-${r.status}${here.length ? ' occupied' : ''}` },
             el('div', { class: 'pips' },
@@ -273,6 +337,7 @@ function runway(): HTMLElement {
         el('div', { class: 'runway-head' },
             el('h2', {}, 'Version runway'),
             el('span', { class: 'dim' }, verdict(talos)),
+            el('span', { class: 'faint small', title: releasesTitle() }, `Releases ${releasesText()}`),
         ),
         el('div', { class: 'track' },
             older.length ? el('div', { class: 'stop s-old occupied' }, el('div', { class: 'pips' }, ...older.map((m) => el('span', { class: 'pip v-unsupported', title: `${m.name} · ${m.talos!.raw}` }))), el('div', { class: 'marker' }), el('div', { class: 'stop-label' }, el('strong', {}, 'older'))) : null,
@@ -288,7 +353,7 @@ function runway(): HTMLElement {
 /** One sentence on where the cluster stands. */
 function verdict(talos: Machine[]): string {
     if (!talos.length) return 'No machine reports Talos as its OS.';
-    const latest = LATEST_STABLE.latest;
+    const latest = latestStable().latest;
     const behind = talos.filter((m) => ['behind', 'patch', 'unsupported'].includes(standing(m.talos)));
     const ahead = talos.filter((m) => standing(m.talos) === 'ahead');
     if (!behind.length && !ahead.length) return `All ${talos.length} on ${latest}, the latest stable.`;
@@ -332,7 +397,7 @@ function tile(m: Machine): HTMLElement {
             ...services.map((s) => el('span', { class: `seg h-${serviceHealth(s.spec)}` })),
         )
         : null;
-    const healthy = services?.filter((s) => serviceHealth(s.spec) === 'healthy').length ?? 0;
+    const healthy = services?.filter((s) => serviceOk(s.spec)).length ?? 0;
 
     const card = el('div', {
         class: `tile${m.name === state.selected ? ' on' : ''}${err ? ' unreachable' : ''}`,
@@ -345,14 +410,14 @@ function tile(m: Machine): HTMLElement {
             el('strong', { class: 'grow ellipsis' }, m.name),
             versionBadge(m.talos),
         ),
-        el('div', { class: 'mono faint small' }, m.address || 'no address', m.cordoned ? el('span', { class: 'chip warn' }, 'cordoned') : null),
+        el('div', { class: 'mono faint small', title: ADDRESS_FROM[m.addressFrom] }, m.address || 'no address', m.cordoned ? el('span', { class: 'chip warn' }, 'cordoned') : null),
         el('div', { class: 'tile-stage small' },
             err ? el('span', { class: 'tone-error' }, err)
             : stage ? el('span', {}, stage, status?.status?.ready === false ? el('span', { class: 'tone-warn' }, ' · not ready') : null)
             : el('span', { class: 'faint' }, state.conn?.ready ? '…' : m.ready ? 'Ready in Kubernetes' : 'NotReady in Kubernetes'),
         ),
         healthBar,
-        services ? el('div', { class: 'faint small' }, `${healthy}/${services.length} services healthy`) : null,
+        services ? el('div', { class: 'faint small' }, `${healthy}/${services.length} services OK`) : null,
         el('div', { class: 'tile-foot small' },
             sec?.secureBoot ? el('span', { class: 'chip ok', title: 'Secure Boot' }, 'secure boot') : null,
             ext ? el('span', { class: 'chip', title: realExtensions(ext).map((e) => e.spec.metadata?.name).join('\n') }, `${realExtensions(ext).length} ext`) : null,
@@ -372,6 +437,97 @@ function tile(m: Machine): HTMLElement {
 function select(name: string): void {
     state.selected = state.selected === name ? '' : name;
     render();
+}
+
+// ----- the machine list beside an open machine ----------------------------------------------
+
+const RAIL_SEARCH = 'rail-search';
+
+/** The machines the list shows: all of them, or those whose name or address has the query in it. */
+function railMachines(): Machine[] {
+    const q = state.railQuery.trim().toLowerCase();
+    return q ? state.machines.filter((m) => m.name.toLowerCase().includes(q) || m.address.includes(q)) : state.machines;
+}
+
+/** Opens the machine `step` places from the open one in the list, wrapping round. */
+function step(by: number): void {
+    const list = railMachines();
+    if (!list.length) return;
+    const at = list.findIndex((m) => m.name === state.selected);
+    const next = list[(at + by + list.length) % list.length]!;
+    state.selected = next.name;
+    render();
+}
+
+function rail(selected: Machine): HTMLElement {
+    const list = railMachines();
+    const search = el('input', {
+        id: RAIL_SEARCH,
+        type: 'search',
+        class: 'rail-search',
+        placeholder: `Find among ${state.machines.length}…`,
+        'aria-label': 'Find a machine by name or address',
+        spellcheck: 'false',
+        'data-k8sdockside-keep': 'off',
+    });
+    search.value = state.railQuery;
+    on(search, 'input', () => { state.railQuery = search.value; render(); });
+    on(search, 'keydown', (e) => {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            step(e.key === 'ArrowDown' ? 1 : -1);
+        } else if (e.key === 'Enter' && list.length && !list.some((m) => m.name === selected.name)) {
+            state.selected = list[0]!.name;
+            render();
+        } else if (e.key === 'Escape') {
+            if (state.railQuery) state.railQuery = '';
+            else state.selected = '';
+            render();
+        }
+    });
+
+    const cp = list.filter((m) => m.controlPlane);
+    const workers = list.filter((m) => !m.controlPlane);
+    const section = (title: string, ms: Machine[]) => ms.length
+        ? [el('div', { class: 'rail-group' }, title, el('span', { class: 'faint' }, ` ${ms.length}`)), ...ms.map((m) => railItem(m, selected))]
+        : [];
+    return el('nav', { class: 'rail card', 'aria-label': 'Machines' },
+        el('div', { class: 'rail-head' },
+            button('← Board', () => { state.selected = ''; render(); }, { class: 'link small', title: 'Back to every machine as tiles (Esc)' }),
+            el('span', { class: 'grow' }),
+            el('span', { class: 'faint small' }, list.length === state.machines.length ? `${list.length}` : `${list.length} of ${state.machines.length}`),
+        ),
+        search,
+        el('div', { class: 'rail-list', role: 'listbox' },
+            ...section('Control plane', cp),
+            ...section('Workers', workers),
+            list.length ? null : el('p', { class: 'faint small rail-empty' }, 'No machine matches.'),
+        ),
+        el('div', { class: 'faint small rail-hint' }, '↑ ↓ in the search box move between machines'),
+    );
+}
+
+function railItem(m: Machine, selected: Machine): HTMLElement {
+    const status = itemsOf(state.live.status, m.address)?.[0]?.spec;
+    const services = itemsOf(state.live.services, m.address);
+    const err = errorOf(m.address);
+    const stage = status?.stage ?? '';
+    const bad = services?.filter((s) => !serviceOk(s.spec)).length ?? 0;
+    const on_ = m.name === selected.name;
+    const item = el('button', {
+        type: 'button',
+        class: `rail-item${on_ ? ' on' : ''}`,
+        role: 'option',
+        'aria-selected': on_ ? 'true' : 'false',
+        title: [m.address || 'no address', err || stage || (m.ready ? 'Ready' : 'Not ready'), bad ? `${bad} service${bad === 1 ? '' : 's'} not OK` : ''].filter(Boolean).join(' · '),
+    },
+        dot(err ? 'error' : stage ? stageTone(stage) : m.ready ? 'ok' : 'error'),
+        el('span', { class: 'grow ellipsis' }, m.name),
+        bad ? el('span', { class: 'chip warn' }, String(bad)) : null,
+        el('span', { class: `rail-ver v-${standing(m.talos)}` }, m.talos?.raw ?? ''),
+    );
+    on(item, 'click', () => { state.selected = m.name; render(); });
+    return item;
 }
 
 // ----- the drawer --------------------------------------------------------------------------
@@ -394,13 +550,15 @@ function drawer(m: Machine): HTMLElement {
         el('div', { class: 'drawer-head' },
             el('div', { class: 'grow' },
                 el('h2', {}, m.name, ' ', versionBadge(m.talos)),
-                el('div', { class: 'dim small mono' }, `${m.address} · ${m.controlPlane ? 'control plane' : 'worker'} · ${m.kernel}`),
+                el('div', { class: 'dim small mono', title: ADDRESS_FROM[m.addressFrom] }, `${m.address || 'no address'} · ${m.controlPlane ? 'control plane' : 'worker'} · ${m.kernel}`),
             ),
-            button('✕', () => select(m.name), { class: 'icon-btn', title: 'Close', 'aria-label': 'Close' }),
+            railMachines().length > 1 ? button('‹', () => step(-1), { class: 'icon-btn', title: 'Previous machine', 'aria-label': 'Previous machine' }) : null,
+            railMachines().length > 1 ? button('›', () => step(1), { class: 'icon-btn', title: 'Next machine', 'aria-label': 'Next machine' }) : null,
+            button('✕', () => select(m.name), { class: 'icon-btn', title: 'Back to the board', 'aria-label': 'Close' }),
         ),
         el('div', { class: 'drawer-actions' },
             ready ? button('Console', () => void openConsole(state.conn!, m).catch(showError), { class: 'btn' }) : null,
-            ready ? button('Dashboard ↗', () => void dashboard(state.conn!, [m.address]).catch(showError), { class: 'btn', title: 'talosctl dashboard, in your own terminal' }) : null,
+            ready ? button('Dashboard', () => void dashboard(state.conn!, [m.address]).catch(showError), { class: 'btn', title: dashboardTitle([m.address]) }) : null,
             button('Kubernetes node', () => void k8sdockside.open({ kind: 'nodes', name: m.name }), { class: 'btn ghost' }),
             el('span', { class: 'grow' }),
             ready ? button('Reboot…', () => void reboot(m), { class: 'btn danger-outline' }) : null,
@@ -469,7 +627,12 @@ async function readTab(m: Machine, tab: Tab): Promise<Child> {
 }
 
 function pre(content: string, ...extra: Child[]): HTMLElement {
-    return el('div', {}, el('div', { class: 'tab-tools' }, ...extra), el('pre', { class: 'out' }, content || '(nothing)'));
+    const wrap = el('label', { class: 'small check' }, el('input', { type: 'checkbox', 'data-k8sdockside-keep': 'off' }), ' Wrap lines');
+    const box = wrap.querySelector('input')!;
+    box.checked = state.wrap;
+    const out = el('pre', { class: `out${state.wrap ? ' wrap' : ''}` }, content || '(nothing)');
+    on(box, 'change', () => { state.wrap = box.checked; out.classList.toggle('wrap', state.wrap); });
+    return el('div', {}, el('div', { class: 'tab-tools' }, wrap, el('span', { class: 'grow' }), ...extra), out);
 }
 
 /** talosctl puts "<node>: " before every line it streams; on one machine it says nothing. */
@@ -488,11 +651,16 @@ function kv(rows: [string, Child][]): HTMLElement {
 }
 
 async function overview(m: Machine, conn: Connection): Promise<Child> {
-    const [info, procs, mem, time] = await Promise.all([
+    const [info, procs, mem, time, factory, platform, configImage] = await Promise.all([
         getOne<Record<string, string>>(conn, 'systeminformation', m.address).catch(() => []),
         getOne<Record<string, unknown>>(conn, 'processors', m.address).catch(() => []),
         getOne<{ sizeMiB?: number }>(conn, 'memorymodules', m.address).catch(() => []),
         getOne<{ synced?: boolean }>(conn, 'timestatus', m.address).catch(() => []),
+        getOne<FactorySpec>(conn, 'imagefactoryschematic', m.address).catch(() => []),
+        getOne<PlatformSpec>(conn, 'platformmetadata', m.address).catch(() => []),
+        // machine.install.image, read by the app out of the machine config;
+        // the rest of the config never reaches this page.
+        installImage(conn, m.address).catch(() => null),
     ]);
     const ext = itemsOf(state.live.extensions, m.address) ?? [];
     const sec = itemsOf(state.live.security, m.address)?.[0]?.spec;
@@ -501,9 +669,10 @@ async function overview(m: Machine, conn: Connection): Promise<Child> {
     const cores = procs.reduce((n, p) => n + Number(p.spec.threadCount ?? p.spec.coreCount ?? 0), 0);
     const memMiB = mem.reduce((n, d) => n + (d.spec.sizeMiB ?? 0), 0);
     const schematic = schematicOf(ext);
+    const source = installSource(factory[0]?.spec, platform[0]?.spec, sec?.secureBoot, schematic, configImage);
 
     return el('div', { class: 'stack' },
-        upgradePanel(m, schematic),
+        upgradePanel(m, source),
         status?.status?.unmetConditions?.length
             ? el('div', { class: 'callout warn' }, el('strong', {}, 'Not ready: '), status.status.unmetConditions.map((c) => `${c.name} (${c.reason})`).join(', '))
             : null,
@@ -531,40 +700,157 @@ async function overview(m: Machine, conn: Connection): Promise<Child> {
     );
 }
 
+/** Whether the upgrade panel offers alpha, beta and rc releases. Off until asked for. */
+let withPrereleases = false;
+
+const KIND_TEXT: Record<UpgradeOption['kind'], string> = { patch: 'patch', minor: 'next minor', prerelease: 'pre-release' };
+
 /** Where this machine should go next, and the command that takes it there. */
-function upgradePanel(m: Machine, schematic: string): HTMLElement {
+function upgradePanel(m: Machine, src: InstallSource): HTMLElement {
     const next = nextUpgrade(m.talos);
-    const versions = RELEASES.map((r) => r.latest).filter((v) => !m.talos || parseVersion(v)!.raw !== m.talos.raw);
+    const stable = latestStable();
+    const s = standing(m.talos);
+    const head = el('div', { class: 'upgrade-head' },
+        el('strong', {}, next ? `Upgrade available: ${next.latest}` : s === 'current' ? `On the latest stable, ${stable.latest}` : STANDING_TEXT[s]),
+        next && next.latest !== stable.latest ? el('span', { class: 'faint small' }, ` · then ${stable.latest}`) : null,
+        el('span', { class: 'faint small', title: releasesTitle() }, ` · releases ${releasesText()}`),
+    );
+    const pre = el('label', { class: 'small check' }, el('input', { type: 'checkbox', 'data-k8sdockside-keep': 'off' }), ' Show pre-releases (alpha, beta, rc)');
+    const preBox = pre.querySelector('input')!;
+    preBox.checked = withPrereleases;
+    // The overview tab this panel sits in is kept rather than read again, so
+    // the panel draws itself again in place.
+    on(preBox, 'change', () => {
+        withPrereleases = preBox.checked;
+        preBox.closest('.upgrade')?.replaceWith(upgradePanel(m, src));
+    });
+
+    const sourceLine = el('p', { class: 'faint small', title: sourceTitle(src) },
+        sourceText(src),
+        src.note ? el('span', { class: 'tone-warn' }, ' ' + src.note) : null,
+        src.known ? null : src.from === 'machine'
+            ? el('span', { class: 'tone-warn' }, ' Factory or platform could not be read from the machine and is assumed; check the image.')
+            : null,
+    );
+
+    const options = upgradeOptions(m.talos, withPrereleases);
+    // Asking for pre-releases must never look like it did nothing: say which
+    // exist and why they are not offered yet.
+    const held = withPrereleases ? heldBackPrereleases(m.talos) : [];
+    const heldLine = held.length
+        ? el('p', { class: 'small tone-warn' }, held.map((h) => `${h.version} is not offered: ${h.reason}.`).join(' '))
+        : withPrereleases && !options.some((o) => o.kind === 'prerelease')
+            ? el('p', { class: 'faint small' }, 'No pre-release newer than this machine.')
+            : null;
+    if (!options.length) {
+        return el('div', { class: `upgrade card-inner v-${s}` }, head,
+            el('p', { class: 'dim small' }, m.talos ? `Nothing newer to upgrade ${m.talos.raw} to${withPrereleases ? '' : ' among stable releases'}. Downgrades are not offered.` : 'The Talos version is not known.'),
+            el('div', { class: 'row' }, pre),
+            heldLine,
+            sourceLine,
+        );
+    }
+
     const pick = el('select', { 'aria-label': 'Talos version', 'data-k8sdockside-keep': 'off' },
-        ...versions.map((v) => {
-            const o = el('option', { value: v }, v + (v === next?.latest ? ' (next step)' : v === LATEST_STABLE.latest ? ' (latest)' : ''));
-            o.selected = v === (next?.latest ?? LATEST_STABLE.latest);
-            return o;
+        ...options.map((o) => {
+            const opt = el('option', { value: o.version }, `${o.version} · ${KIND_TEXT[o.kind]}${o.next ? ' (next step)' : ''}`);
+            opt.selected = o.next;
+            return opt;
         }),
     );
     const image = el('input', { type: 'text', class: 'mono grow', 'aria-label': 'Installer image', spellcheck: 'false', 'data-k8sdockside-keep': 'off' });
-    image.value = installerImage(pick.value, schematic);
-    on(pick, 'change', () => (image.value = installerImage(pick.value, schematic)));
+    const go = button('Upgrade…', () => void upgrade(), { class: 'btn primary' });
+    const care = el('div', {});
+    const problem = el('p', { class: 'small tone-error', hidden: true });
+    let ack: HTMLInputElement | null = null;
 
-    const s = standing(m.talos);
-    return el('div', { class: `upgrade card-inner v-${s}` },
-        el('div', { class: 'upgrade-head' },
-            el('strong', {}, next ? `Upgrade available: ${next.latest}` : s === 'current' ? 'On the latest stable' : STANDING_TEXT[s]),
-            next && next !== LATEST_STABLE ? el('span', { class: 'faint small' }, ` · then ${LATEST_STABLE.latest}`) : null,
-        ),
-        el('div', { class: 'row' },
-            pick,
-            image,
-            button('Upgrade…', () => void run(state.conn!, ['upgrade', '--image', image.value.trim()], m, {
-                title: `Upgrade ${m.name} to ${pick.value}`,
-                danger: true,
-                confirm: m.name,
-            }).catch(declined), { class: 'btn primary' }),
-        ),
-        el('p', { class: 'faint small' }, schematic
-            ? 'The installer keeps this machine’s Image Factory schematic, and so its extensions. The machine drains, upgrades and reboots; watch it in the console.'
-            : 'No Image Factory schematic: the stock installer is used. Change the image if this machine needs extensions.'),
+    const chosen = () => options.find((o) => o.version === pick.value)!;
+    const check = () => {
+        // The image can be edited, for an installer built some other way; its
+        // tag must still be newer than what runs.
+        const tagged = imageVersion(image.value.trim());
+        const wrong = !tagged ? 'The image needs a version tag, like :v1.14.5.'
+            : m.talos && compareVersions(tagged, m.talos) <= 0 ? `${tagged.raw} is not newer than ${m.talos.raw}: downgrades are not offered.`
+            : '';
+        problem.textContent = wrong;
+        problem.hidden = !wrong;
+        go.disabled = !!wrong || (ack !== null && !ack.checked);
+    };
+    const choose = () => {
+        const o = chosen();
+        image.value = installerImage(o.version, src);
+        ack = null;
+        if (o.kind === 'patch') {
+            replace(care);
+        } else {
+            const to = parseVersion(o.version)!;
+            const line = `${to.major}.${to.minor}`;
+            const notes = `https://github.com/siderolabs/talos/releases/tag/${o.version}`;
+            const guide = `https://www.talos.dev/v${line}/talos-guides/upgrading-talos/`;
+            const box = el('input', { type: 'checkbox', 'data-k8sdockside-keep': 'off' }) as HTMLInputElement;
+            on(box, 'change', check);
+            ack = box;
+            replace(care, el('div', { class: `callout ${o.kind === 'prerelease' ? 'error' : 'warn'}` },
+                o.kind === 'prerelease'
+                    ? el('p', {}, el('strong', {}, `${o.version} is a pre-release. `), 'Alpha, beta and rc releases are experimental: they can break the machine, and are not for clusters anyone depends on.')
+                    : el('p', {}, el('strong', {}, `A new minor release, ${m.talos ? `${m.talos.major}.${m.talos.minor}` : ''} → ${line}. `),
+                        'A minor can change a great deal: the machine config’s format and multi-document configs, options removed or renamed, new defaults. Read its upgrade notes before upgrading, and upgrade one machine first.'),
+                el('p', { class: 'small' },
+                    button('Release notes ↗', () => void k8sdockside.openUrl(notes), { class: 'link' }), ' · ',
+                    button(`Upgrading Talos ${line} ↗`, () => void k8sdockside.openUrl(guide), { class: 'link' })),
+                el('label', { class: 'small check' }, box,
+                    o.kind === 'prerelease' ? ` I understand ${o.version} is experimental, and want it on ${m.name}` : ` I have read the ${line} upgrade notes`),
+            ));
+        }
+        check();
+    };
+    const upgrade = async () => {
+        const o = chosen();
+        await run(state.conn!, ['upgrade', '--image', image.value.trim()], m, {
+            title: `Upgrade ${m.name} to ${o.version}${o.kind === 'patch' ? '' : o.kind === 'minor' ? ' (new minor release)' : ' (pre-release)'}`,
+            danger: true,
+            confirm: m.name,
+        }).catch(declined);
+    };
+    on(pick, 'change', choose);
+    on(image, 'input', check);
+    choose();
+
+    return el('div', { class: `upgrade card-inner v-${s}` }, head,
+        el('div', { class: 'row' }, pick, image, go),
+        problem,
+        care,
+        el('div', { class: 'row' }, pre),
+        heldLine,
+        sourceLine,
+        el('p', { class: 'faint small' }, src.schematic
+            ? 'The installer keeps this machine’s factory, installer and schematic -- and so its extensions -- and changes only the version. The machine drains, upgrades and reboots; watch it in the console.'
+            : src.repository
+                ? 'The installer is the one the machine config names, with only the version changed. Change the image if this machine needs extensions.'
+                : 'Change the image if this machine needs extensions or was installed from an installer of your own.'),
     );
+}
+
+/** Where each part of the installer image came from, in a line. */
+function sourceText(src: InstallSource): string {
+    const schematic = src.schematic
+        ? ` · schematic ${src.schematic.slice(0, 12)}… ${src.schematicFrom === 'machine' ? 'from the running machine' : 'from the install image (as first installed)'}`
+        : '';
+    if (src.from === 'config') {
+        return src.repository
+            ? `Installer ${src.repository} from the machine config’s install image · version changed only`
+            : `Installer ${src.factory}/${src.variant} from the machine config’s install image${schematic}`;
+    }
+    return src.schematic
+        ? `Installer from ${src.factory} · ${src.variant}${schematic}`
+        : 'No Image Factory schematic: the stock installer.';
+}
+
+function sourceTitle(src: InstallSource): string {
+    const reads = 'imagefactoryschematic for the schematic it runs';
+    return src.from === 'config'
+        ? `Host and installer from machine.install.image, which the app reads out of the machine config for this plugin -- the plugin never sees the rest of the config. That image is the one the machine was first installed from (${src.configImage}); Talos does not update it on upgrade, so the schematic is read from the machine (${reads}) and the version is the one you pick.`
+        : `Read from the machine (${reads}, platformmetadata, securitystate). The machine config's install image could not be read -- this needs K8s Dockside 0.1.33 or newer -- so the platform's installer is assumed from the platform Talos detected at boot.`;
 }
 
 async function servicesTab(m: Machine, conn: Connection): Promise<Child> {
@@ -578,7 +864,7 @@ async function servicesTab(m: Machine, conn: Connection): Promise<Child> {
                 const h = serviceHealth(s.spec);
                 return el('tr', {},
                     el('td', { class: 'mono' }, id),
-                    el('td', {}, dot(h === 'healthy' ? 'ok' : h === 'running' ? 'info' : h === 'stopped' ? 'error' : 'warn'), ' ', h),
+                    el('td', {}, dot(h === 'healthy' || h === 'running' ? 'ok' : h === 'stopped' ? 'error' : 'warn'), ' ', h === 'running' ? 'running (no health check)' : h),
                     el('td', { class: 'right' },
                         button('Logs', () => { state.logService = id; state.tab = 'logs'; render(); }, { class: 'link' }),
                         button('Restart…', () => void run(conn, ['service', id, 'restart'], m, { title: `Restart ${id} on ${m.name}` }).catch(declined), { class: 'link' }),
@@ -690,7 +976,7 @@ async function healthCheck(): Promise<void> {
     if (!cp || !state.conn) return;
     showModal('Cluster health', el('div', { class: 'loading' }, el('span', { class: 'pulse' }), ` Running talosctl health from ${cp.name}…`));
     try {
-        const out = await k8sdockside.tools!.exec('talosctl', ['health', '--wait-timeout', '25s', '--context', state.conn.context, '--nodes', cp.address]);
+        const out = await exec(state.conn, ['health', '--wait-timeout', '25s'], [cp.address]);
         showModal('Cluster health', el('div', {},
             el('p', {}, dot(out.code === 0 ? 'ok' : 'error'), out.code === 0 ? ' Every check passed.' : ' Some checks did not pass.'),
             el('pre', { class: 'out' }, (out.stdout + '\n' + out.stderr).trim()),

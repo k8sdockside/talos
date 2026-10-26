@@ -1,5 +1,5 @@
-// k8sdockside.tools, from K8s Dockside 0.1.23 and @k8sdockside/plugin-sdk
-// 1.1.0. Copied here until that SDK is published: delete this file and bump
+// k8sdockside.tools, from K8s Dockside 0.1.23 (tools.extract from 0.1.33) and
+// @k8sdockside/plugin-sdk 1.1.0. Copied here until that SDK is published: delete this file and bump
 // the devDependency to ^1.1.0 then. Interfaces merge, so the two can overlap.
 
 declare namespace K8sDockside {
@@ -46,6 +46,16 @@ declare namespace K8sDockside {
         truncated: boolean;
     }
 
+    /**
+     * What `tools.extract` resolves with, one per resource the command printed
+     * (K8s Dockside 0.1.33): the machine, and the named fields that were there.
+     */
+    interface ToolExtracted {
+        node: string;
+        fields: Record<string, string | number | boolean>;
+        error?: string;
+    }
+
     interface ToolRunRequest {
         tool: string;
         /** Must match one of the tool's `run` patterns. Never the files' flags: the app adds them. */
@@ -77,6 +87,12 @@ declare namespace K8sDockside {
         exec(tool: string, args: string[]): Promise<ToolOutput>;
         /** `exec`, then stdout as JSON. Rejects with stderr on a non-zero code. */
         json<T = unknown>(tool: string, args: string[]): Promise<T>;
+        /**
+         * Runs a `read` entry declared as an extraction, and resolves with only
+         * the fields it names; the app parses the output, and it never reaches
+         * the page. Absent on an app older than 0.1.33.
+         */
+        extract?: (tool: string, args: string[]) => Promise<ToolExtracted[]>;
         /** Asks to run a `run` command, confirmed by the user, in the tool's console in the dock. */
         run(request: ToolRunRequest): Promise<{ command: string }>;
         /** Opens the tool's console in the dock. */

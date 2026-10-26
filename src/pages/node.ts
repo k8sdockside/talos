@@ -3,10 +3,12 @@
 
 import { button, byId, el, replace } from '@k8sdockside/plugin-sdk/dom';
 import {
+    allAddresses,
     machineOf,
     nextUpgrade,
     realExtensions,
     serviceHealth,
+    serviceOk,
     stageTone,
     type ExtensionSpec,
     type MachineStatus,
@@ -14,25 +16,36 @@ import {
     type ServiceSpec,
 } from '../model/talos';
 import { dot, handOver, showError, versionBadge } from '../ui/common';
-import { connect, console as openConsole, dashboard, getOne, message } from '../ui/talos';
+import { loadReleases } from '../ui/releases';
+import { addressed, connect, learnAddresses, console as openConsole, dashboard, dashboardTitle, getOne, message } from '../ui/talos';
 
 async function start(): Promise<void> {
     await k8sdockside.ready();
-    const m = machineOf(await k8sdockside.object<K8sDockside.KubeObject>() as unknown as NodeObject);
-    const next = nextUpgrade(m.talos);
-    const head = el('div', { class: 'panel-head' },
-        versionBadge(m.talos),
-        next ? el('span', { class: 'small dim' }, `upgrade to ${next.latest} available`) : null,
-        el('span', { class: 'grow' }),
-        button('Open board', () => void handOver(m.name).catch(showError), { class: 'btn' }),
-    );
+    const listed = machineOf(await k8sdockside.object<K8sDockside.KubeObject>() as unknown as NodeObject);
+    let m = listed;
+    // Drawn again when the live release list is in: the badge and the
+    // upgrade line both measure against it.
+    const head = el('div', { class: 'panel-head' });
+    const drawHead = () => {
+        const next = nextUpgrade(m.talos);
+        replace(head,
+            versionBadge(m.talos),
+            next ? el('span', { class: 'small dim' }, `upgrade to ${next.latest} available`) : null,
+            el('span', { class: 'grow' }),
+            button('Open board', () => void handOver(m.name).catch(showError), { class: 'btn' }),
+        );
+    };
+    drawHead();
+    void loadReleases().then((changed) => changed && drawHead());
     if (!m.talos) {
         replace(byId('main'), head, el('p', { class: 'dim' }, 'This node does not run Talos Linux.'));
         return;
     }
     replace(byId('main'), head, el('div', { class: 'loading' }, el('span', { class: 'pulse' }), ' Asking the machine…'));
 
-    const conn = await connect([m.address]);
+    const conn = await connect(allAddresses([listed]));
+    await learnAddresses(conn, addressed([listed], conn));
+    m = addressed([listed], conn)[0] ?? listed;
     if (!conn.ready) {
         replace(byId('main'), head, el('p', { class: 'dim small' }, conn.reason));
         return;
@@ -46,7 +59,7 @@ async function start(): Promise<void> {
         throw null;
     });
     const stage = status[0]?.spec.stage ?? '?';
-    const bad = services.filter((s) => serviceHealth(s.spec) !== 'healthy');
+    const bad = services.filter((s) => !serviceOk(s.spec));
     replace(byId('main'),
         head,
         el('div', { class: 'panel-row' },
@@ -56,10 +69,10 @@ async function start(): Promise<void> {
             el('span', { class: 'small dim' }, `${services.length - bad.length}/${services.length} services healthy`),
         ),
         bad.length ? el('p', { class: 'small tone-warn' }, 'Not healthy: ' + bad.map((s) => `${s.metadata.id} (${serviceHealth(s.spec)})`).join(', ')) : null,
-        el('p', { class: 'small faint' }, `${realExtensions(ext).length} extensions · ${m.kernel}`),
+        el('p', { class: 'small faint' }, `${realExtensions(ext).length} extensions · ${m.kernel} · talosctl uses ${m.address}`),
         el('div', { class: 'row' },
             button('Console', () => void openConsole(conn, m).catch(showError), { class: 'btn' }),
-            button('Dashboard ↗', () => void dashboard(conn, [m.address]).catch(showError), { class: 'btn' }),
+            button('Dashboard', () => void dashboard(conn, [m.address]).catch(showError), { class: 'btn', title: dashboardTitle([m.address]) }),
         ),
     );
 }

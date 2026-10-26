@@ -1,8 +1,8 @@
-// What both pages share: errors, small drawing helpers, and the hand-over from
+// What the pages share: errors, small drawing helpers, and the hand-over from
 // a node's panel to the board.
 
 import { el } from '@k8sdockside/plugin-sdk/dom';
-import { standing, type Standing, type Version } from '../model/talos';
+import { standing, type AddressSource, type Standing, type Version } from '../model/talos';
 import { message } from './talos';
 
 export function showError(err: unknown): void {
@@ -30,6 +30,29 @@ export const STANDING_TEXT: Record<Standing, string> = {
 export function versionBadge(v: Version | null): HTMLElement {
     const s = standing(v);
     return el('span', { class: `badge v-${s}`, title: STANDING_TEXT[s] }, v ? v.raw : 'not Talos');
+}
+
+/** Where the address talosctl uses for a machine came from, for a tooltip. */
+export const ADDRESS_FROM: Record<AddressSource, string> = {
+    talosconfig: 'The address the talosconfig names for this machine',
+    external: 'The machine’s ExternalIP',
+    internal: 'The machine’s InternalIP',
+    custom: 'The address you set in Settings',
+    none: 'Kubernetes lists no address for this machine: set one in Settings',
+};
+
+/** Something a page remembers for this cluster, or `fallback` when nothing is kept. */
+export async function recall<T>(key: string, fallback: T): Promise<T> {
+    try {
+        const v = await k8sdockside.storage?.get<T>(key);
+        return v === null || v === undefined ? fallback : v;
+    } catch {
+        return fallback;
+    }
+}
+
+export function keep(key: string, value: unknown): void {
+    void k8sdockside.storage?.set(key, value).catch(() => null);
 }
 
 export function dot(tone: string, title = ''): HTMLElement {

@@ -3,7 +3,7 @@
     "id": "talos",
     "name": "Talos",
     "version": "0.1.0",
-    "minAppVersion": "0.1.23",
+    "minAppVersion": "0.1.33",
     "tagline": "the machines under your Kubernetes",
     "category": "platform",
     "icon": "server",
@@ -13,9 +13,10 @@
         { "label": "Source", "url": "https://github.com/k8sdockside/talos" },
         { "label": "Talos docs", "url": "https://www.talos.dev/" }
     ],
-    "description": "For clusters running Talos Linux 1.12 to 1.15. Every machine on one board: control plane and workers, the Talos version each runs and how far it is from the latest, its stage, its services, its extensions and whether it boots securely. Pick a machine for its hardware, disks, network, services, logs and kernel messages, and etcd on the control plane.\n\nUpgrades, reboots and service restarts are worked out into the exact talosctl command, shown to you, and run in a talosctl console in the dock only if you say yes. The console is there on its own as well, already pointed at the cluster's talosconfig and the machine you picked.\n\nIt runs the talosctl on your machine with the talosconfig you choose for each cluster (~/.talos/config unless you say otherwise). Only the commands listed below can be run; the machine config, which holds secrets, is never read. Without a talosconfig the board still shows what Kubernetes knows about the machines.",
+    "description": "For clusters running Talos Linux 1.12 to 1.15. Every machine on one board: control plane and workers, the Talos version each runs and how far it is from the latest release (read from GitHub by the app when it can, else from the table built into the plugin), its stage, its services, its extensions and whether it boots securely. Pick a machine for its hardware, disks, network, services, logs and kernel messages, and etcd on the control plane.\n\nUpgrades, reboots and service restarts are worked out into the exact talosctl command, shown to you, and run in a talosctl console in the dock only if you say yes. The console is there on its own as well, already pointed at the cluster's talosconfig and the machine you picked.\n\nDashboard is every machine at once, kept up to date: stage, services, memory, clock and etcd, with talosctl dashboard and the console a click away for the machines you pick. Extensions lists the system extensions across the cluster: each one's versions, the machines it is on and missing from, and the Image Factory schematics the machines were built from. Settings shows the talosconfig in use and its contexts, endpoints and nodes, lets you choose another for the cluster, and sets the endpoints and the address talosctl uses for each machine -- ExternalIP, InternalIP or one of your own, for clouds where the internal one cannot be reached.\n\nIt runs the talosctl on your machine with the talosconfig you choose for each cluster (~/.talos/config unless you say otherwise). Only the commands listed below can be run. Of the machine config, which holds secrets, the app reads only machine.install.image -- the installer an upgrade should keep -- and hands the plugin that one value; the plugin never sees the rest. Without a talosconfig the board still shows what Kubernetes knows about the machines.",
     "requires": [{ "kind": "nodes", "label": "Nodes" }],
     "ui": {
+        "releases": [{ "github": "siderolabs/talos" }],
         "tools": [
             {
                 "id": "talosctl",
@@ -39,6 +40,16 @@
                     "get services **",
                     "get extensions **",
                     "get securitystate **",
+                    "get imagefactoryschematic **",
+                    "get platformmetadata **",
+                    {
+                        "command": "get machineconfig **",
+                        "extract": {
+                            "format": "yaml-documents",
+                            "output": ["-o", "yaml"],
+                            "fields": ["machine.install.image"]
+                        }
+                    },
                     "get systeminformation **",
                     "get processors **",
                     "get memorymodules **",
@@ -46,6 +57,7 @@
                     "get volumestatus **",
                     "get mounts **",
                     "get addresses **",
+                    "get nodeaddress **",
                     "get routes **",
                     "get links **",
                     "get resolvers **",
@@ -75,5 +87,10 @@
         ]
     },
     "overview": { "entry": "fleet.html" },
+    "views": [
+        { "id": "dashboard", "label": "Dashboard", "icon": "gauge", "type": "custom", "entry": "dashboard.html" },
+        { "id": "extensions", "label": "Extensions", "icon": "puzzle", "type": "custom", "entry": "extensions.html" },
+        { "id": "settings", "label": "Settings", "icon": "settings", "type": "custom", "entry": "settings.html" }
+    ],
     "sections": [{ "id": "node", "label": "Talos", "kind": "nodes", "entry": "node.html", "height": 190 }]
 }

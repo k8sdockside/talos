@@ -532,13 +532,120 @@ input[type='text'].grow {
     background: var(--ok);
 }
 .seg.h-running {
-    background: var(--accent);
+    background: var(--ok);
 }
 .seg.h-stopped {
     background: var(--error);
 }
-.seg.h-unknown {
+.seg.h-unhealthy {
     background: var(--warn);
+}
+
+/* ----- one machine open: the list beside it ----- */
+
+.layout.focus {
+    grid-template-columns: minmax(190px, 250px) minmax(0, 1fr);
+}
+@media (max-width: 760px) {
+    .layout.focus {
+        grid-template-columns: 1fr;
+    }
+    .layout.focus .rail {
+        position: static;
+        max-height: 240px;
+    }
+}
+.rail {
+    position: sticky;
+    top: 8px;
+    max-height: calc(100vh - 24px);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    min-width: 0;
+}
+.rail-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.rail-search {
+    width: 100%;
+    min-width: 0;
+}
+.rail-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+.rail-group {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    padding: 8px 6px 4px;
+}
+.rail-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    min-width: 0;
+    padding: 5px 6px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: none;
+    color: var(--text);
+    font: inherit;
+    font-size: 12.5px;
+    text-align: left;
+    cursor: pointer;
+}
+.rail-item:hover {
+    background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+.rail-item.on {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.rail-item .chip.warn {
+    margin-left: 0;
+}
+.rail-ver {
+    font: 10.5px var(--mono, monospace);
+    color: var(--vc, var(--text-faint));
+    white-space: nowrap;
+}
+.rail-empty,
+.rail-hint {
+    padding: 0 6px;
+}
+.layout.focus .drawer {
+    position: static;
+    max-height: none;
+    overflow: visible;
+    min-width: 0;
+}
+.layout.focus .out {
+    /* The machine has the width; give its output the height. */
+    max-height: calc(100vh - 260px);
+    min-height: 320px;
+}
+.out.wrap {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+label.check {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-dim);
+    cursor: pointer;
 }
 
 /* ----- the drawer ----- */
@@ -650,6 +757,15 @@ input[type='text'].grow {
     border-radius: 8px;
     background: color-mix(in srgb, var(--warn) 12%, transparent);
 }
+.callout.error {
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--error) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--error) 40%, transparent);
+}
+.callout p {
+    margin: 0 0 6px;
+}
 
 .upgrade {
     padding: 10px 12px;
@@ -692,4 +808,97 @@ input[type='text'].grow {
     gap: 8px;
     flex-wrap: wrap;
     margin-bottom: 8px;
+}
+
+/* ----- the other pages: dashboard, extensions, settings ----- */
+
+.pages {
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--border-soft, var(--border));
+    border-radius: 8px;
+    background: var(--bg-panel);
+}
+.page-link {
+    border: none;
+    background: none;
+    padding: 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--text-dim);
+}
+.page-link:hover {
+    color: var(--text);
+    background: var(--bg-hover);
+}
+.page-link.on {
+    color: var(--text);
+    background: color-mix(in srgb, var(--talos) 14%, transparent);
+}
+.section {
+    padding: 14px 16px;
+    margin-bottom: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.section p {
+    margin: 0;
+}
+.settings .kv {
+    grid-template-columns: 110px 1fr;
+}
+.grid tr.on td {
+    background: color-mix(in srgb, var(--talos) 6%, transparent);
+}
+.row.nowrap {
+    flex-wrap: nowrap;
+}
+.scroll-x {
+    overflow-x: auto;
+}
+.stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+}
+.stat {
+    padding: 10px 12px;
+}
+.stat-value {
+    font-size: 18px;
+    font-weight: 600;
+}
+.meter {
+    width: 120px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--border);
+    overflow: hidden;
+}
+.meter span {
+    display: block;
+    height: 100%;
+    background: var(--ok);
+}
+.meter.high span {
+    background: var(--warn);
+}
+.plain-list {
+    margin: 0;
+    padding-left: 18px;
+}
+.matrix th,
+.matrix td.cell {
+    white-space: nowrap;
+}
+.matrix td.cell.missing {
+    color: var(--text-faint);
+    background: color-mix(in srgb, var(--warn) 8%, transparent);
+}
+.matrix td.cell.differs {
+    color: var(--warn);
+    font-weight: 600;
 }
