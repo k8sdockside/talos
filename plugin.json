@@ -3,7 +3,7 @@
     "id": "talos",
     "name": "Talos",
     "version": "0.1.0",
-    "minAppVersion": "0.1.33",
+    "minAppVersion": "0.1.35",
     "tagline": "the machines under your Kubernetes",
     "category": "platform",
     "icon": "server",
@@ -80,7 +80,9 @@
                     "upgrade **",
                     "upgrade-k8s **",
                     "service * restart **",
-                    "etcd defrag **"
+                    "etcd defrag **",
+                    "etcd snapshot * **",
+                    "bootstrap --recover-from * **"
                 ],
                 "interactive": ["dashboard **"]
             }

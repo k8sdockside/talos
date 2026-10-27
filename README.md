@@ -29,7 +29,9 @@ clusters running [Talos Linux](https://www.talos.dev/) 1.12 to 1.15.
   one minor at a time, and only from the newest patch; a new minor asks you to
   confirm you have read its upgrade notes, and alpha, beta and rc releases are
   hidden until asked for and need an extra confirmation. Also reboot, shut
-  down, restart a service, defragment etcd, upgrade Kubernetes,
+  down, restart a service, defragment etcd, snapshot etcd to a file you
+  choose, restore etcd from a snapshot (disaster recovery, with the steps
+  before it written out), upgrade Kubernetes,
   and run a health check. Each is written out as the exact `talosctl` command,
   confirmed by you, and run in a **talosctl console** in the dock, where you
   can watch it.
@@ -56,7 +58,8 @@ clusters running [Talos Linux](https://www.talos.dev/) 1.12 to 1.15.
 
 ## Needs
 
-- K8s Dockside **0.1.23** or newer (desktop app). It gives plugins
+- K8s Dockside **0.1.35** or newer (desktop app; 0.1.35 asks for the file an
+  etcd snapshot or restore uses). It gives plugins
   `"ui": { "tools": [...] }`.
 - `talosctl` on your machine. Its version should be within one minor of your
   machines'.

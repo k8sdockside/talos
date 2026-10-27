@@ -782,20 +782,24 @@ label.check {
 
 /* ----- the modal ----- */
 
+/* In the middle of the page, at any size: as tall as it allows and no taller,
+   scrolling inside, so its buttons can be reached on a small screen. */
 .modal-scrim {
     position: fixed;
     inset: 0;
     background: rgb(0 0 0 / 0.35);
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: center;
-    padding: 8vh 16px;
+    box-sizing: border-box;
+    padding: 16px;
     z-index: 10;
 }
 .modal {
+    box-sizing: border-box;
     width: min(720px, 100%);
     padding: 16px;
-    max-height: 80vh;
+    max-height: 100%;
     overflow: auto;
 }
 

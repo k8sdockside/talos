@@ -944,12 +944,74 @@ async function etcdTab(m: Machine, conn: Connection): Promise<Child> {
         el('div', { class: 'tab-tools' },
             refreshTab(m),
             button('Defragment…', () => void run(conn, ['etcd', 'defrag'], m, { title: `Defragment etcd on ${m.name}` }).catch(declined), { class: 'link small' }),
+            button('Snapshot…', () => void snapshotEtcd(conn, m), { class: 'link small', title: 'Save a snapshot of etcd from this machine to a file on your computer' }),
+            button('Restore…', () => openEtcdRestore(m), { class: 'link small', title: 'Recover etcd from a snapshot, after a disaster' }),
         ),
         el('h4', {}, 'Status'),
         el('pre', { class: 'out' }, status),
         el('h4', {}, 'Members'),
         el('pre', { class: 'out' }, members),
+        el('h4', {}, 'Backup and restore'),
+        el('p', { class: 'faint small' },
+            'Snapshot saves etcd -- every Kubernetes object -- from this machine to a file you choose on your computer (talosctl etcd snapshot). ',
+            'Restore brings a cluster whose etcd is lost back from such a file (talosctl bootstrap --recover-from); it is for disaster recovery only, not for rolling a working cluster back.'),
     );
+}
+
+/** A file name for a snapshot: the context, the machine and when. */
+function snapshotName(m: Machine): string {
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+    const safe = (v: string) => v.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+    return ['etcd', safe(state.conn?.context || state.contextName), safe(m.name), stamp].filter(Boolean).join('-') + '.snapshot';
+}
+
+async function snapshotEtcd(conn: Connection, m: Machine): Promise<void> {
+    await run(conn, ['etcd', 'snapshot', '{path}'], m, {
+        title: `Snapshot etcd on ${m.name}`,
+        path: { mode: 'save', title: `Where to save the etcd snapshot from ${m.name}`, name: snapshotName(m) },
+    }).catch(declined);
+}
+
+/**
+ * Disaster recovery: etcd brought back from a snapshot on one control plane
+ * machine. Talos does this only when etcd is not running anywhere -- each
+ * control plane machine reset, its etcd waiting to be bootstrapped -- so the
+ * steps are written out, and only the last is run from here.
+ */
+function openEtcdRestore(m: Machine): void {
+    const skip = el('input', { type: 'checkbox', 'data-k8sdockside-keep': 'off' }) as HTMLInputElement;
+    const cps = state.machines.filter((x) => x.controlPlane);
+    const nodes = cps.map((x) => x.address || x.name).join(',');
+    showModal(`Restore etcd on ${m.name}`, el('div', { class: 'stack' },
+        el('div', { class: 'callout error' },
+            el('p', {}, el('strong', {}, 'For disaster recovery only. '),
+                'Restoring replaces the whole cluster state with the snapshot\u2019s: everything written to Kubernetes since it was taken is gone. ',
+                'Take a fresh snapshot first if etcd still answers on any machine.'),
+        ),
+        el('p', {}, 'Talos restores etcd only when it is not running on any control plane machine. Before restoring:'),
+        el('ol', { class: 'small' },
+            el('li', {}, 'Take a snapshot now, if etcd still answers anywhere (Snapshot\u2026 on the etcd tab).'),
+            el('li', {}, 'Reset every control plane machine\u2019s etcd data, in the console: ',
+                el('code', { class: 'mono' }, `reset --graceful=false --reboot --system-labels-to-wipe=EPHEMERAL --nodes ${nodes || '<control plane>'}`)),
+            el('li', {}, 'Wait until each shows etcd as Preparing (the services tab, or the Dashboard).'),
+            el('li', {}, `Then restore here, on ${m.name} alone. The other control plane machines join it.`),
+        ),
+        el('label', { class: 'small check' }, skip, ' The file was copied from etcd\u2019s data directory, not taken with talosctl etcd snapshot (skips the hash check)'),
+        el('div', { class: 'row' },
+            button('Open console', () => void openConsole(state.conn!, m).catch(showError), { class: 'btn' }),
+            button('Choose snapshot and restore…', () => {
+                closeModal();
+                void run(state.conn!, ['bootstrap', '--recover-from', '{path}', ...(skip.checked ? ['--recover-skip-hash-check'] : [])], m, {
+                    title: `Restore etcd on ${m.name} from a snapshot`,
+                    danger: true,
+                    confirm: m.name,
+                    path: { mode: 'open', title: 'The etcd snapshot to restore from' },
+                }).catch(declined);
+            }, { class: 'btn primary' }),
+        ),
+    ));
 }
 
 // ----- operations ------------------------------------------------------------------------

@@ -252,10 +252,11 @@ export async function run(
     conn: Connection,
     args: string[],
     node: { name: string; address: string } | null,
-    opts: { title: string; danger?: boolean; confirm?: string },
+    opts: { title: string; danger?: boolean; confirm?: string; path?: K8sDockside.ToolRunPath },
 ): Promise<void> {
     const nodes = node ? [node.address] : [];
     await tools().run({
+        path: opts.path,
         tool: TOOL,
         args: [...args, ...target(conn, nodes)],
         defaults: target(conn, nodes),
