@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
     DEFAULT_SETTINGS,
     allAddresses,
+    atBottom,
     compareVersions,
     endpointsFor,
     extensionRows,
+    fillHeight,
     hostOf,
     installerImage,
     machineOf,
@@ -631,5 +633,24 @@ describe('pre-releases held back', () => {
         ]);
         expect(heldBackPrereleases(v('v1.14.5'))).toEqual([]);
         expect(heldBackPrereleases(v('v1.13.12'))[0]?.reason).toBe('one minor at a time -- 1.14 first');
+    });
+});
+
+describe('log boxes', () => {
+    it('follows the last lines only from at or near the bottom', () => {
+        // 1000 high, 400 shown: the bottom is at 600.
+        expect(atBottom(600, 1000, 400)).toBe(true);
+        expect(atBottom(575, 1000, 400)).toBe(true);
+        expect(atBottom(570, 1000, 400)).toBe(true);
+        expect(atBottom(569, 1000, 400)).toBe(false);
+        expect(atBottom(0, 1000, 400)).toBe(false);
+        // Shorter than the box: nothing to scroll, so at the bottom.
+        expect(atBottom(0, 300, 400)).toBe(true);
+    });
+
+    it('fills the window below the box’s top, but not below the least', () => {
+        expect(fillHeight(900, 300, 30, 240)).toBe(570);
+        expect(fillHeight(900, 300.6, 30, 240)).toBe(569);
+        expect(fillHeight(500, 300, 30, 240)).toBe(240);
     });
 });

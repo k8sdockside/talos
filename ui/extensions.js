@@ -308,7 +308,7 @@
       learned: learned && typeof learned === "object" ? learned : {}
     };
     if (!k8sdockside.tools) {
-      return { ...out, fix: "app", reason: "Talos needs K8s Dockside 0.1.23 or newer, which can run talosctl for a plugin. The board below is what Kubernetes knows." };
+      return { ...out, fix: "app", reason: "Talos needs K8s Dockside 0.1.23 or newer, which can run talosctl for a plugin. The nodes below are what Kubernetes knows." };
     }
     try {
       out.status = await tools().status(TOOL);
@@ -448,7 +448,7 @@
     return { contextName, listed, machines: addressed(listed, conn), conn };
   }
   var PAGES = [
-    ["overview", "Board"],
+    ["overview", "Nodes"],
     ["dashboard", "Dashboard"],
     ["extensions", "Extensions"],
     ["settings", "Settings"]
@@ -691,7 +691,7 @@
       "section",
       { class: "card section" },
       el("h2", {}, "Image Factory schematics"),
-      el("p", { class: "dim small" }, groups.size > 1 ? "The machines were built from different schematics, so they carry different extensions. An upgrade from the board keeps each machine’s own schematic." : "A schematic is the Image Factory recipe a machine was built from, extensions included. An upgrade from the board keeps it."),
+      el("p", { class: "dim small" }, groups.size > 1 ? "The machines were built from different schematics, so they carry different extensions. An upgrade from Nodes keeps each machine’s own schematic." : "A schematic is the Image Factory recipe a machine was built from, extensions included. An upgrade from Nodes keeps it."),
       el(
         "table",
         { class: "grid" },

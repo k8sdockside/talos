@@ -35,6 +35,8 @@ import {
     type UpgradeOption,
     compareVersions,
     heldBackPrereleases,
+    atBottom,
+    fillHeight,
 } from '../model/talos';
 import { TALOS_LOGO } from '../ui/logo';
 import { loadReleases, releasesText, releasesTitle } from '../ui/releases';
@@ -92,6 +94,12 @@ const state = {
     railQuery: '',
     /** Whether long lines in a tab's output wrap, rather than scroll sideways. */
     wrap: false,
+    /**
+     * Where each log box was left, by its drawer key: at the bottom, following
+     * the last lines, or scrolled up to `top` to read older ones. Kept when the
+     * tab is read again, so a reader scrolled up is not thrown to the bottom.
+     */
+    follow: new Map<string, { stuck: boolean; top: number }>(),
 };
 
 // ----- reading ---------------------------------------------------------------------------
@@ -124,6 +132,8 @@ async function start(): Promise<void> {
         showError,
     );
     setInterval(() => void readLive(false), LIVE_EVERY);
+    // The log box runs to the bottom of the window, however tall it is.
+    window.addEventListener('resize', () => { rememberLogs(); fitWindow(); });
 }
 
 async function reconnect(): Promise<void> {
@@ -176,6 +186,8 @@ function errorOf(address: string): string {
 
 function render(): void {
     clearError();
+    // Drawing again takes the log box off the page, which loses its place.
+    rememberLogs();
     const selected = state.machines.find((m) => m.name === state.selected) ?? null;
     // Everything is drawn again on each reading, and the machine list's search
     // box with it: put the focus and the caret back where they were.
@@ -199,6 +211,9 @@ function render(): void {
         input?.setSelectionRange(typing.start, typing.end);
     }
     document.querySelector('.rail-item.on')?.scrollIntoView({ block: 'nearest' });
+    // One machine open fills the window, and its log box ends at its bottom.
+    document.body.classList.toggle('focused', !!selected);
+    fitWindow();
 }
 
 function header(): HTMLElement {
@@ -493,7 +508,7 @@ function rail(selected: Machine): HTMLElement {
         : [];
     return el('nav', { class: 'rail card', 'aria-label': 'Machines' },
         el('div', { class: 'rail-head' },
-            button('← Board', () => { state.selected = ''; render(); }, { class: 'link small', title: 'Back to every machine as tiles (Esc)' }),
+            button('← Nodes', () => { state.selected = ''; render(); }, { class: 'link small', title: 'Back to every node as tiles (Esc)' }),
             el('span', { class: 'grow' }),
             el('span', { class: 'faint small' }, list.length === state.machines.length ? `${list.length}` : `${list.length} of ${state.machines.length}`),
         ),
@@ -554,7 +569,7 @@ function drawer(m: Machine): HTMLElement {
             ),
             railMachines().length > 1 ? button('‹', () => step(-1), { class: 'icon-btn', title: 'Previous machine', 'aria-label': 'Previous machine' }) : null,
             railMachines().length > 1 ? button('›', () => step(1), { class: 'icon-btn', title: 'Next machine', 'aria-label': 'Next machine' }) : null,
-            button('✕', () => select(m.name), { class: 'icon-btn', title: 'Back to the board', 'aria-label': 'Close' }),
+            button('✕', () => select(m.name), { class: 'icon-btn', title: 'Back to the nodes', 'aria-label': 'Close' }),
         ),
         el('div', { class: 'drawer-actions' },
             ready ? button('Console', () => void openConsole(state.conn!, m).catch(showError), { class: 'btn' }) : null,
@@ -577,9 +592,14 @@ function notConnected(): HTMLElement {
     return el('p', { class: 'dim' }, 'Connect talosctl above to see this machine’s services, logs, hardware and storage, and to upgrade or reboot it.');
 }
 
+/** What a machine's open tab is kept under: the machine, the tab, and for logs the service. */
+function tabKey(m: Machine): string {
+    return `${m.name}/${state.tab}${state.tab === 'logs' ? '/' + state.logService : ''}`;
+}
+
 /** A tab's contents, read once per machine and tab, with a way to read again. */
 function body(m: Machine): Child {
-    const key = `${m.name}/${state.tab}${state.tab === 'logs' ? '/' + state.logService : ''}`;
+    const key = tabKey(m);
     const kept = state.drawer.get(key);
     if (kept instanceof Promise) return loading();
     if (kept) return kept;
@@ -615,7 +635,7 @@ async function readTab(m: Machine, tab: Tab): Promise<Child> {
             return logsTab(m, conn);
         case 'kernel': {
             const out = await text(conn, ['dmesg'], [m.address]);
-            return pre(lastLines(stripNode(out, m.address), 400), refreshTab(m));
+            return pre(tabKey(m), lastLines(stripNode(out, m.address), 400), refreshTab(m));
         }
         case 'network':
             return networkTab(m, conn);
@@ -626,13 +646,68 @@ async function readTab(m: Machine, tab: Tab): Promise<Child> {
     }
 }
 
-function pre(content: string, ...extra: Child[]): HTMLElement {
+/**
+ * A log box: the last lines of a log, kept at the bottom as it is read again
+ * unless the reader has scrolled up (see `placeLog`). `key` is the tab's
+ * drawer key, which its place is remembered by.
+ */
+function pre(key: string, content: string, ...extra: Child[]): HTMLElement {
     const wrap = el('label', { class: 'small check' }, el('input', { type: 'checkbox', 'data-k8sdockside-keep': 'off' }), ' Wrap lines');
     const box = wrap.querySelector('input')!;
     box.checked = state.wrap;
-    const out = el('pre', { class: `out${state.wrap ? ' wrap' : ''}` }, content || '(nothing)');
-    on(box, 'change', () => { state.wrap = box.checked; out.classList.toggle('wrap', state.wrap); });
-    return el('div', {}, el('div', { class: 'tab-tools' }, wrap, el('span', { class: 'grow' }), ...extra), out);
+    const out = el('pre', { class: `out log${state.wrap ? ' wrap' : ''}`, 'data-follow': key }, content || '(nothing)');
+    on(box, 'change', () => {
+        rememberLogs();
+        state.wrap = box.checked;
+        out.classList.toggle('wrap', state.wrap);
+        placeLog(out);
+    });
+    return el('div', { class: 'log-tab' }, el('div', { class: 'tab-tools' }, wrap, el('span', { class: 'grow' }), ...extra), out);
+}
+
+/**
+ * Where each log box on the page is scrolled to, while it is still on it:
+ * taken off the page and put back, a box is scrolled to the top.
+ */
+function rememberLogs(): void {
+    for (const out of document.querySelectorAll<HTMLElement>('pre.out.log')) {
+        state.follow.set(out.dataset.follow ?? '', { stuck: atBottom(out.scrollTop, out.scrollHeight, out.clientHeight), top: out.scrollTop });
+    }
+}
+
+/**
+ * One machine open fills the window and no more: the machine list beside it
+ * and the log box in it end at the window's bottom, each scrolling on its own,
+ * and the page does not scroll as well.
+ */
+function fitWindow(): void {
+    const padding = parseFloat(getComputedStyle(document.body).paddingBottom || '0');
+    const rail = document.querySelector<HTMLElement>('.layout.focus .rail');
+    // Only beside the machine; stacked above it on a narrow window, the stylesheet sizes it.
+    if (rail) {
+        rail.style.maxHeight = getComputedStyle(rail).position === 'sticky'
+            ? `${fillHeight(window.innerHeight, rail.getBoundingClientRect().top + window.scrollY, padding, 200)}px`
+            : '';
+    }
+    for (const out of document.querySelectorAll<HTMLElement>('pre.out.log')) placeLog(out);
+}
+
+/**
+ * Sizes a log box to end at the bottom of the window -- with only the
+ * drawer's and the page's padding under it, so the page itself does not
+ * scroll -- then scrolls it to its last lines, or, if the reader had scrolled
+ * up, back to where they were. The page is drawn again on every reading, which
+ * takes the box off the page and back, and that loses its scroll position.
+ */
+function placeLog(out: HTMLElement): void {
+    const drawer = out.closest('.drawer');
+    if (drawer) {
+        const below = drawer.getBoundingClientRect().bottom - out.getBoundingClientRect().bottom
+            + parseFloat(getComputedStyle(document.body).paddingBottom || '0');
+        out.style.height = `${fillHeight(window.innerHeight, out.getBoundingClientRect().top + window.scrollY, below, 240)}px`;
+    }
+    const kept = state.follow.get(out.dataset.follow ?? '');
+    out.scrollTop = !kept || kept.stuck ? out.scrollHeight : kept.top;
 }
 
 /** talosctl puts "<node>: " before every line it streams; on one machine it says nothing. */
@@ -886,7 +961,7 @@ async function logsTab(m: Machine, conn: Connection): Promise<Child> {
     );
     on(pick, 'change', () => { state.logService = pick.value; render(); });
     const out = await text(conn, ['logs', state.logService, '--tail', '300'], [m.address]);
-    return pre(stripNode(out, m.address), pick, refreshTab(m),
+    return pre(tabKey(m), stripNode(out, m.address), pick, refreshTab(m),
         button('Follow in console', () => void openConsole(conn, m).catch(showError), { class: 'link small', title: `Then type: logs ${state.logService} -f` }));
 }
 

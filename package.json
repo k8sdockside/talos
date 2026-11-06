@@ -1,6 +1,6 @@
 {
     "name": "k8sdockside-talos",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "private": true,
     "description": "Talos: a K8s Dockside plugin for Talos Linux clusters -- the machines, their versions and services, upgrades, and a talosctl console.",
     "license": "Apache-2.0",

@@ -77,7 +77,7 @@ export async function connect(addresses: string[]): Promise<Connection> {
         learned: learned && typeof learned === 'object' ? learned : {},
     };
     if (!k8sdockside.tools) {
-        return { ...out, fix: 'app', reason: 'Talos needs K8s Dockside 0.1.23 or newer, which can run talosctl for a plugin. The board below is what Kubernetes knows.' };
+        return { ...out, fix: 'app', reason: 'Talos needs K8s Dockside 0.1.23 or newer, which can run talosctl for a plugin. The nodes below are what Kubernetes knows.' };
     }
     try {
         out.status = await tools().status(TOOL);

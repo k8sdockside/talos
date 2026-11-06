@@ -28,7 +28,7 @@ export async function loadCluster(contextName: string): Promise<Cluster> {
 }
 
 const PAGES: [string, string][] = [
-    ['overview', 'Board'],
+    ['overview', 'Nodes'],
     ['dashboard', 'Dashboard'],
     ['extensions', 'Extensions'],
     ['settings', 'Settings'],

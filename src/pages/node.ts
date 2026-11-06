@@ -32,7 +32,7 @@ async function start(): Promise<void> {
             versionBadge(m.talos),
             next ? el('span', { class: 'small dim' }, `upgrade to ${next.latest} available`) : null,
             el('span', { class: 'grow' }),
-            button('Open board', () => void handOver(m.name).catch(showError), { class: 'btn' }),
+            button('Open in Nodes', () => void handOver(m.name).catch(showError), { class: 'btn' }),
         );
     };
     drawHead();

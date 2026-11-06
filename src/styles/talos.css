@@ -31,6 +31,10 @@ body {
 body.page {
     padding: 16px 20px 40px;
 }
+/* One machine open fills the window: no more room under it than above. */
+body.page.focused {
+    padding-bottom: 16px;
+}
 
 body.panel {
     padding: 4px 2px 8px;
@@ -631,10 +635,11 @@ input[type='text'].grow {
     overflow: visible;
     min-width: 0;
 }
-.layout.focus .out {
-    /* The machine has the width; give its output the height. */
-    max-height: calc(100vh - 260px);
-    min-height: 320px;
+.layout.focus .out.log {
+    /* The machine has the width; its log has the rest of the window's
+       height, set by the page to end at the window's bottom (fitWindow). */
+    max-height: none;
+    min-height: 0;
 }
 .out.wrap {
     white-space: pre-wrap;

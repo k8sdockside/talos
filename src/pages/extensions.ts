@@ -204,8 +204,8 @@ function schematicCard(groups: Map<string, string[]>): HTMLElement {
     return el('section', { class: 'card section' },
         el('h2', {}, 'Image Factory schematics'),
         el('p', { class: 'dim small' }, groups.size > 1
-            ? 'The machines were built from different schematics, so they carry different extensions. An upgrade from the board keeps each machine’s own schematic.'
-            : 'A schematic is the Image Factory recipe a machine was built from, extensions included. An upgrade from the board keeps it.'),
+            ? 'The machines were built from different schematics, so they carry different extensions. An upgrade from Nodes keeps each machine’s own schematic.'
+            : 'A schematic is the Image Factory recipe a machine was built from, extensions included. An upgrade from Nodes keeps it.'),
         el('table', { class: 'grid' },
             el('thead', {}, el('tr', {}, el('th', {}, 'Schematic'), el('th', {}, 'Machines'))),
             el('tbody', {}, ...list.map(([id, machines]) => el('tr', {},

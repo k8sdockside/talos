@@ -1033,3 +1033,25 @@ export function shortError(text: string): string {
     const descs = [...text.matchAll(/desc = ([^"\n]+)/g)].map((m) => m[1] ?? '');
     return (descs.at(-1) ?? text).trim().slice(0, 200);
 }
+
+// ----- log boxes -------------------------------------------------------------------------------
+
+/** How close to the bottom of a log box still counts as at the bottom, in pixels. */
+export const STICK_SLACK = 30;
+
+/**
+ * Whether a log box is scrolled to its last lines -- or near enough that the
+ * reader is following them, not reading back.
+ */
+export function atBottom(scrollTop: number, scrollHeight: number, clientHeight: number, slack = STICK_SLACK): boolean {
+    return scrollHeight - clientHeight - scrollTop <= slack;
+}
+
+/**
+ * The height that takes a log box from `top` (from the top of the window) to
+ * the bottom of the window, leaving `below` for what comes after it on the
+ * page -- never less than `min`.
+ */
+export function fillHeight(windowHeight: number, top: number, below: number, min: number): number {
+    return Math.max(min, Math.floor(windowHeight - top - below));
+}

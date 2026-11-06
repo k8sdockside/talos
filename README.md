@@ -6,16 +6,18 @@ clusters running [Talos Linux](https://www.talos.dev/) 1.12 to 1.15.
 - **Version runway**: every machine placed on the Talos release lines, with
   the latest stable marked and the next upgrade step named. Talos upgrades go
   one minor at a time.
-- **Machine board**: control plane and workers as tiles, with stage, service
+- **Nodes**: control plane and workers as tiles, with stage, service
   health, extensions, Secure Boot, CPU and memory. Machines that do not answer
   on the Talos API are shown as unreachable rather than hidden.
 - **Machine view**: pick a machine and it takes the page's width, with every
   machine in a list beside it -- searchable by name or address, grouped into
-  control plane and workers, ↑/↓ or ‹/› to move between them, Esc back to the
-  board -- so it works the same for 3 machines or 100. Overview (hardware,
+  control plane and workers, ↑/↓ or ‹/› to move between them, Esc back to
+  Nodes -- so it works the same for 3 machines or 100. Overview (hardware,
   security, extensions, Image Factory schematic), services with logs and
   restart, logs (with line wrapping), kernel messages, network, disks and
-  volumes, and etcd on the control plane.
+  volumes, and etcd on the control plane. Logs and kernel messages run to the
+  bottom of the window and open, and read again, at their latest lines --
+  unless you have scrolled up to read older ones.
 - **Operations**: upgrade Talos -- the installer image is the machine's own,
   with only the version changed: the registry and installer variant (e.g.
   `factory.talos.dev` + `nocloud-installer`, a Secure Boot one, your own
@@ -37,7 +39,7 @@ clusters running [Talos Linux](https://www.talos.dev/) 1.12 to 1.15.
   can watch it.
 - **Console**: a talosctl console in the dock, already pointed at the cluster's
   talosconfig, context and the machine you picked. **Dashboard · all N
-  machines** on the board runs `talosctl dashboard --nodes` for every machine
+  machines** on Nodes runs `talosctl dashboard --nodes` for every machine
   at once (switch machine with ← and →); each machine has its own button too.
   Both open in the dock, or in your own terminal if the app's Settings →
   Terminal says so.
@@ -64,7 +66,7 @@ clusters running [Talos Linux](https://www.talos.dev/) 1.12 to 1.15.
 - `talosctl` on your machine. Its version should be within one minor of your
   machines'.
 - A talosconfig. `~/.talos/config` is used unless you choose another for the
-  cluster (**Settings**, or **Change…** on the board). The context is matched
+  cluster (**Settings**, or **Change…** on Nodes). The context is matched
   to the cluster by its endpoints, and you can pick another.
 
 ## Which address talosctl uses
@@ -80,7 +82,7 @@ talosconfig's, ones you give, or each machine itself. Every page, the console
 and the commands it runs use these. They are kept by the app for this
 cluster, never in the cluster.
 
-Without talosctl or a talosconfig, the board still shows what Kubernetes knows:
+Without talosctl or a talosconfig, Nodes still shows what Kubernetes knows:
 versions, readiness and capacity.
 
 ## What it can run
